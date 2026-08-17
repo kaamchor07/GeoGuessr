@@ -1,8 +1,10 @@
-# Large datasets & test images (available directly on Kaggle as input datasets)
+# Large training datasets
 training_dataset/
-test_images_sampled/
-*.jpg
-*.png
+
+# Keep test images in repo (only 27MB)
+!test_images_sampled/
+!test_images_sampled/*.jpg
+
 
 # Checkpoints & cached embeddings
 checkpoints/*.pt
