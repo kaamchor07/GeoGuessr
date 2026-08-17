@@ -90,7 +90,8 @@ def spherical_weighted_average(lats_deg: np.ndarray, lons_deg: np.ndarray, weigh
 # ---------------------------------------------------------------------------
 # KMeans clustering
 # ---------------------------------------------------------------------------
-def cluster_kmeans(coords_xyz, n_clusters: int, min_cluster_size: int = 5, seed: int = 42):
+def cluster_kmeans(coords_xyz, n_clusters: int, min_cluster_size: int = 3, seed: int = 42):
+
     from sklearn.cluster import MiniBatchKMeans
 
     print(f"[KMeans] Fitting {n_clusters} clusters on {len(coords_xyz)} points …")
@@ -193,7 +194,7 @@ def main():
         default=10,
         help="[optics] min_samples parameter",
     )
-    parser.add_argument("--xi", type=float, default=0.05, help="[optics] xi steepness parameter")
+    parser.add_argument("--min_cluster_size", type=int, default=3, help="[kmeans] merge clusters with fewer points")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--out_assignments",
@@ -222,9 +223,15 @@ def main():
 
     # Cluster
     if args.method == "kmeans":
-        labels, centroids_xyz = cluster_kmeans(coords_xyz, args.n_clusters, args.seed)
+        labels, centroids_xyz = cluster_kmeans(
+            coords_xyz,
+            n_clusters=args.n_clusters,
+            min_cluster_size=args.min_cluster_size,
+            seed=args.seed,
+        )
     else:
         labels, centroids_xyz = cluster_optics(coords_xyz, args.min_samples, args.xi, args.seed)
+
 
     n_cells = len(np.unique(labels))
     print(f"Total geocells: {n_cells}")
