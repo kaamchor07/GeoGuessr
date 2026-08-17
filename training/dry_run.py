@@ -338,7 +338,7 @@ ckpt_size = ckpt_path.stat().st_size / 1e6
 check(ckpt_path.exists() and ckpt_size > 0.1, f"Checkpoint saved: {ckpt_size:.1f} MB", "Checkpoint not saved")
 
 # Reload
-ckpt = torch.load(ckpt_path, map_location="cpu")
+ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
 model2 = GeoLocModel(n_geocells=n_geocells, n_countries=n_countries,
                      clip_model_name="ViT-B-32", clip_pretrained="openai")
 model2.load_state_dict(ckpt["model"])

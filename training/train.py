@@ -211,7 +211,7 @@ def train(args):
 
     if args.resume and Path(args.resume).exists():
         print(f"Resuming from {args.resume}")
-        ckpt = torch.load(args.resume, map_location=device)
+        ckpt = torch.load(args.resume, map_location=device, weights_only=False)
         (model.module if isinstance(model, nn.DataParallel) else model).load_state_dict(ckpt["model"])
         optimizer.load_state_dict(ckpt["optimizer"])
         scheduler.load_state_dict(ckpt["scheduler"])

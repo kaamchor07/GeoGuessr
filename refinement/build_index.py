@@ -52,7 +52,7 @@ def build_faiss_index(
 
     if model_checkpoint and Path(model_checkpoint).exists():
         print(f"[FAISS Indexer] Loading weights from {model_checkpoint}")
-        ckpt = torch.load(model_checkpoint, map_location="cpu")
+        ckpt = torch.load(model_checkpoint, map_location="cpu", weights_only=False)
         model.load_state_dict(ckpt.get("model", ckpt))
 
     model = model.to(device)

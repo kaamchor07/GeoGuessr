@@ -82,14 +82,92 @@ def optimize_radius_parameters(
     return best_params
 
 
-if __name__ == "__main__":
-    # Test stub with synthetic validation predictions
-    print("Testing radius calibration module...")
-    n = 200
-    t_lats = np.random.uniform(-50, 60, n)
-    t_lons = np.random.uniform(-150, 150, n)
-    p_lats = t_lats + np.random.normal(0, 1.5, n)
-    p_lons = t_lons + np.random.normal(0, 1.5, n)
-    base_r = np.random.uniform(50, 300, n)
+def calibrate_on_checkpoint(
+    checkpoint_path: str = str(ROOT / "checkpoints" / "best.pt"),
+    batch_size: int = 64,
+    device_str: str = "cuda" if torch.cuda.is_available() else "cpu",
+    output_path: str = str(DATA_DIR / "calibration_params.json"),
+):
+    device = torch.device(device_str)
+    print(f"[Radius Calibrator] Running on {device}")
 
-    optimize_radius_parameters(t_lats, t_lons, p_lats, p_lons, base_r)
+    # Load validation split
+    from data.dataset import GeoDataset
+    from models.model import GeoLocModel
+    from torch.utils.data import DataLoader
+
+    val_ds = GeoDataset("val", val_frac=0.1, augment=False)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=2 if device.type == "cuda" else 0)
+
+    centroids_df = pd.read_csv(DATA_DIR / "geocell_centroids.csv").sort_values("geocell_id").reset_index(drop=True)
+    encoder_df = pd.read_csv(DATA_DIR / "country_encoder.csv")
+    idx2country = dict(zip(encoder_df["country_idx"], encoder_df["country_iso"]))
+
+    # Load model
+    model = GeoLocModel(
+        n_geocells=val_ds.n_geocells,
+        n_countries=val_ds.n_countries,
+        clip_model_name="ViT-B-32",
+        clip_pretrained="openai",
+    )
+
+    if Path(checkpoint_path).exists():
+        print(f"[Radius Calibrator] Loading {checkpoint_path}")
+        ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        model.load_state_dict(ckpt.get("model", ckpt))
+
+    model = model.to(device)
+    model.eval()
+
+    true_lats, true_lons = [], []
+    pred_lats, pred_lons = [], []
+    base_radii = []
+    true_isos, pred_isos = [], []
+
+    print("[Radius Calibrator] Evaluating validation set...")
+    with torch.no_grad():
+        for batch in val_loader:
+            imgs = batch["image"].to(device)
+            out = model(imgs)
+
+            pred_gc = out["geocell_logits"].argmax(dim=-1).cpu().numpy()
+            pred_ct = out["country_logits"].argmax(dim=-1).cpu().numpy()
+
+            true_lats.extend(batch["latitude"].numpy())
+            true_lons.extend(batch["longitude"].numpy())
+            true_isos.extend([idx2country.get(i, "UNK") for i in batch["country_idx"].numpy()])
+
+            pred_lats.extend(centroids_df["centroid_lat"].values[pred_gc])
+            pred_lons.extend(centroids_df["centroid_lon"].values[pred_gc])
+            base_radii.extend(centroids_df["max_radius_km"].values[pred_gc])
+            pred_isos.extend([idx2country.get(i, "UNK") for i in pred_ct])
+
+    return optimize_radius_parameters(
+        val_true_lats=np.array(true_lats),
+        val_true_lons=np.array(true_lons),
+        val_pred_lats=np.array(pred_lats),
+        val_pred_lons=np.array(pred_lons),
+        val_cell_base_radii=np.array(base_radii),
+        val_true_isos=true_isos,
+        val_pred_isos=pred_isos,
+        output_path=output_path,
+    )
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--checkpoint", type=str, default=str(ROOT / "checkpoints" / "best.pt"))
+    args = parser.parse_args()
+
+    if Path(args.checkpoint).exists():
+        calibrate_on_checkpoint(args.checkpoint)
+    else:
+        # Fallback synthetic test
+        n = 200
+        t_lats = np.random.uniform(-50, 60, n)
+        t_lons = np.random.uniform(-150, 150, n)
+        p_lats = t_lats + np.random.normal(0, 1.5, n)
+        p_lons = t_lons + np.random.normal(0, 1.5, n)
+        base_r = np.random.uniform(50, 300, n)
+        optimize_radius_parameters(t_lats, t_lons, p_lats, p_lons, base_r)
+

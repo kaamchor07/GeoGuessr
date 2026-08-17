@@ -109,7 +109,7 @@ def generate_submission(
 
     if checkpoint_path and Path(checkpoint_path).exists():
         print(f"[Inference] Loading model checkpoint: {checkpoint_path}")
-        ckpt = torch.load(checkpoint_path, map_location="cpu")
+        ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
         model.load_state_dict(ckpt.get("model", ckpt))
     else:
         print("[Inference] WARNING: No checkpoint provided — running inference with base model")
