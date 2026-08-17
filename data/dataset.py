@@ -39,6 +39,54 @@ WORLDCOVER_MISSING = -1
 ELEVATION_MISSING  = 0.0
 
 
+def find_dataset_paths():
+    """Locates training images dir and ground_truth_coordinates.csv across local and Kaggle environments."""
+    # 1. Local workspace default
+    local_coords = ROOT / "training_dataset" / "noised_dataset" / "ground_truth_coordinates.csv"
+    local_images = ROOT / "training_dataset" / "noised_dataset" / "images"
+    if local_coords.exists() and local_images.exists():
+        return local_coords, local_images
+
+    # 2. Check Kaggle input directory
+    kaggle_input = Path("/kaggle/input")
+    if kaggle_input.exists():
+        # Search recursively for ground_truth_coordinates.csv
+        found_csvs = list(kaggle_input.rglob("ground_truth_coordinates.csv"))
+        if found_csvs:
+            coords_path = found_csvs[0]
+            # images folder is usually next to CSV or under noised_dataset/images
+            cand_img_dirs = [
+                coords_path.parent / "images",
+                coords_path.parent / "noised_dataset" / "images",
+            ]
+            for cid in cand_img_dirs:
+                if cid.exists():
+                    return coords_path, cid
+            # Search any images folder in kaggle input
+            for img_dir in kaggle_input.rglob("images"):
+                if img_dir.is_dir() and len(list(img_dir.glob("*.jpg"))) > 10:
+                    return coords_path, img_dir
+
+    # Fallback to local default path
+    return local_coords, local_images
+
+
+def find_test_images_path():
+    """Locates test images directory across local and Kaggle environments."""
+    local_test = ROOT / "test_images_sampled"
+    if local_test.exists() and len(list(local_test.glob("*.jpg"))) > 0:
+        return local_test
+
+    kaggle_input = Path("/kaggle/input")
+    if kaggle_input.exists():
+        # Look for test_images or test_images_sampled
+        for cand in kaggle_input.rglob("*test*"):
+            if cand.is_dir() and len(list(cand.glob("*.jpg"))) > 0:
+                return cand
+
+    return local_test
+
+
 class GeoDataset(Dataset):
     """
     Geolocation dataset with multi-task labels.
@@ -58,19 +106,33 @@ class GeoDataset(Dataset):
         seed: int = 42,
         augment: bool = True,
         max_samples: int = None,
-        images_dir: Path = IMAGES_DIR,
+        images_dir: Path = None,
+        coords_csv: Path = None,
         data_dir: Path = DATA_DIR,
     ):
         super().__init__()
         self.split = split
         self.augment = augment and (split == "train")
-        self.images_dir = images_dir
+
+        auto_coords, auto_images = find_dataset_paths()
+        self.images_dir = Path(images_dir) if images_dir is not None else auto_images
+        coords_path = Path(coords_csv) if coords_csv is not None else auto_coords
+
+        print(f"[GeoDataset] Using coords: {coords_path}")
+        print(f"[GeoDataset] Using images: {self.images_dir}")
+
+        if not coords_path.exists():
+            raise FileNotFoundError(
+                f"Ground truth coordinates CSV not found at '{coords_path}'. "
+                "If running on Kaggle, please ensure the competition dataset is attached under /kaggle/input/."
+            )
 
         # --- Load and merge all label tables ---
-        coords     = pd.read_csv(data_dir / ".." / "training_dataset" / "noised_dataset" / "ground_truth_coordinates.csv")
+        coords     = pd.read_csv(coords_path)
         geocells   = pd.read_csv(data_dir / "geocell_assignments.csv")[["image_id", "geocell_id"]]
         countries  = pd.read_csv(data_dir / "country_labels.csv")[["image_id", "country_iso"]]
         encoder    = pd.read_csv(data_dir / "country_encoder.csv")
+
 
         # Merge
         df = coords.merge(geocells, on="image_id").merge(countries, on="image_id")
@@ -186,15 +248,17 @@ def get_dataloaders(
     seed: int = 42,
     max_train_samples: int = None,
     max_val_samples: int = None,
+    images_dir: Path = None,
+    coords_csv: Path = None,
 ):
     """
     Returns (train_loader, val_loader, dataset_meta).
     dataset_meta: dict with n_geocells, n_countries.
     """
     train_ds = GeoDataset("train", val_frac=val_frac, seed=seed, augment=True,
-                          max_samples=max_train_samples)
+                          max_samples=max_train_samples, images_dir=images_dir, coords_csv=coords_csv)
     val_ds   = GeoDataset("val",   val_frac=val_frac, seed=seed, augment=False,
-                          max_samples=max_val_samples)
+                          max_samples=max_val_samples, images_dir=images_dir, coords_csv=coords_csv)
 
     g = torch.Generator()
     g.manual_seed(seed)
@@ -219,11 +283,16 @@ def get_dataloaders(
     return train_loader, val_loader, meta
 
 
+
 class TestDataset(Dataset):
     """Dataset for inference on the test set (no labels)."""
 
-    def __init__(self, test_dir: Path = ROOT / "test_images_sampled"):
-        self.paths = sorted(test_dir.glob("*.jpg"))
+    def __init__(self, test_dir: Path = None):
+        if test_dir is None:
+            test_dir = find_test_images_path()
+        self.test_dir = Path(test_dir)
+        self.paths = sorted(self.test_dir.glob("*.jpg"))
+        print(f"[TestDataset] Found {len(self.paths)} test images in {self.test_dir}")
         clip_mean = [0.48145466, 0.4578275, 0.40821073]
         clip_std  = [0.26862954, 0.26130258, 0.27577711]
         self.transform = transforms.Compose([
@@ -232,7 +301,6 @@ class TestDataset(Dataset):
             transforms.ToTensor(),
             transforms.Normalize(clip_mean, clip_std),
         ])
-        print(f"[TestDataset] {len(self.paths)} test images")
 
     def __len__(self):
         return len(self.paths)
@@ -253,3 +321,4 @@ class TestDataset(Dataset):
             "image":    self.transform(img),
             "image_id": path.name,
         }
+

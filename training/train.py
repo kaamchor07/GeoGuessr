@@ -147,6 +147,8 @@ def train(args):
         seed=args.seed,
         max_train_samples=max_train,
         max_val_samples=max_val,
+        images_dir=args.images_dir,
+        coords_csv=args.coords_csv,
     )
     n_geocells  = meta["n_geocells"]
     n_countries = meta["n_countries"]
@@ -393,6 +395,8 @@ def get_parser():
     p.add_argument("--val_frac",   type=float, default=0.1)
     p.add_argument("--batch_size", type=int, default=16)
     p.add_argument("--num_workers",type=int, default=0)
+    p.add_argument("--coords_csv", type=str, default=None, help="Path to ground_truth_coordinates.csv")
+    p.add_argument("--images_dir", type=str, default=None, help="Path to images directory")
     # Model
     p.add_argument("--clip_model",     type=str, default="ViT-B-32")
     p.add_argument("--clip_pretrained",type=str, default="openai")
@@ -411,6 +415,7 @@ def get_parser():
     p.add_argument("--seed",       type=int, default=42)
     p.add_argument("--ckpt_every_steps", type=int, default=100)
     return p
+
 
 
 if __name__ == "__main__":
