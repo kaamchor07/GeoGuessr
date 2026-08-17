@@ -72,19 +72,42 @@ def find_dataset_paths():
 
 
 def find_test_images_path():
-    """Locates test images directory across local and Kaggle environments."""
+    """Locates test images directory across local and Kaggle environments by matching test image IDs."""
+    # 1. Local workspace default
     local_test = ROOT / "test_images_sampled"
     if local_test.exists() and len(list(local_test.glob("*.jpg"))) > 0:
         return local_test
 
-    kaggle_input = Path("/kaggle/input")
-    if kaggle_input.exists():
-        # Look for test_images or test_images_sampled
-        for cand in kaggle_input.rglob("*test*"):
-            if cand.is_dir() and len(list(cand.glob("*.jpg"))) > 0:
-                return cand
+    # Sample ID to search for
+    sample_sub = ROOT / "sample_submission.csv"
+    sample_id = "34f65e00cc3df67d.jpg"
+    if sample_sub.exists():
+        try:
+            df_s = pd.read_csv(sample_sub)
+            if not df_s.empty and "image_id" in df_s.columns:
+                sample_id = str(df_s["image_id"].iloc[0])
+        except Exception:
+            pass
 
+    search_roots = [Path("/kaggle/input"), Path("/kaggle/working"), ROOT]
+    for s_root in search_roots:
+        if s_root.exists():
+            # 1. Search for the sample test file directly
+            found_files = list(s_root.rglob(sample_id))
+            if found_files:
+                parent_dir = found_files[0].parent
+                print(f"[find_test_images_path] Found test directory via '{sample_id}': {parent_dir}")
+                return parent_dir
+
+            # 2. Search for any directory with 'test' in name containing images
+            for cand in s_root.rglob("*test*"):
+                if cand.is_dir() and len(list(cand.glob("*.jpg"))) > 0:
+                    print(f"[find_test_images_path] Found test directory via wildcard: {cand}")
+                    return cand
+
+    print(f"[find_test_images_path] WARNING: Test images directory not found, falling back to {local_test}")
     return local_test
+
 
 
 class GeoDataset(Dataset):

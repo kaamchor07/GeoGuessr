@@ -40,11 +40,12 @@ def optimize_radius_parameters(
     """
     print("[Radius Calibrator] Starting grid search against competition proxy...")
 
-    alpha_grid = np.linspace(0.5, 2.5, 21)
-    min_r_grid = [25.0, 50.0, 100.0, 150.0, 200.0, 300.0, 500.0]
+    alpha_grid = np.linspace(0.5, 4.0, 36)
+    min_r_grid = [50.0, 100.0, 250.0, 500.0, 750.0, 1000.0, 1250.0, 1500.0, 2000.0, 2500.0]
 
     best_score = -float("inf")
     best_params = {}
+
 
     for alpha in alpha_grid:
         for min_r in min_r_grid:
