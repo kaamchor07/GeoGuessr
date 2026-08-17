@@ -197,18 +197,17 @@ def generate_submission(
         except Exception as e:
             print(f"[Inference] kNN refinement skipped due to: {e}")
 
-    # 5. Radius Calibration
-    calib_params_path = DATA_DIR / "calibration_params.json"
-    alpha = 1.15
-    min_r = 100.0
-    if calib_params_path.exists():
-        with open(calib_params_path, "r") as f:
-            cp = json.load(f)
-            alpha = cp.get("alpha", alpha)
-            min_r = cp.get("min_radius_km", min_r)
-        print(f"[Inference] Loaded calibrated radius params: alpha={alpha}, min_r={min_r}")
+    # 5. Confidence-Aware Adaptive Radius Calibration
+    # Rule of thumb from competition scoring:
+    # Tight & wrong is punished hardest with negative penalties.
+    # Therefore, scale radius safely based on model confidence to ensure high coverage.
+    print("[Inference] Computing confidence-aware calibrated radius...")
+    pred_radii = np.where(all_country_confs > 0.75, 750.0,
+                 np.where(all_country_confs > 0.45, 1250.0, 1850.0))
+    # Blend with cell physical spread
+    pred_radii = np.clip(pred_radii + 0.5 * base_radii, 500.0, 2400.0)
+    print(f"[Inference] Calibrated radii range: [{pred_radii.min():.1f} km, {pred_radii.max():.1f} km], Mean: {pred_radii.mean():.1f} km")
 
-    pred_radii = np.clip(alpha * base_radii, min_r, 2500.0)
 
     # 6. Country Snapping
     if use_snap and (ROOT / "country_boundaries.geojson").exists():
