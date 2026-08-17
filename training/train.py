@@ -307,6 +307,9 @@ def train(args):
         json.dump(history, f, indent=2)
     print(f"\nTraining complete. History saved to {hist_path}")
 
+    # Plot metrics
+    plot_training_curves(history, CKPT_DIR / "training_metrics.png")
+
     # --- Final summary ---
     if history:
         best = min(history, key=lambda r: r["val_loss"])
@@ -314,6 +317,54 @@ def train(args):
         for k, v in best.items():
             if isinstance(v, float):
                 print(f"  {k}: {v:.4f}")
+
+
+def plot_training_curves(history: list, save_path: Path):
+    """Generates visual plots for Loss, Haversine Distance, and Accuracy."""
+    try:
+        import matplotlib.pyplot as plt
+        epochs = [r["epoch"] for r in history]
+        train_losses = [r["train_loss"] for r in history]
+        val_losses = [r["val_loss"] for r in history]
+        median_dists = [r["haversine_median"] for r in history]
+        acc_200 = [r["within_200km"] * 100 for r in history]
+        acc_750 = [r["within_750km"] * 100 for r in history]
+
+        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+        
+        # 1. Loss
+        axes[0].plot(epochs, train_losses, label="Train Loss", marker="o", color="#3b82f6")
+        axes[0].plot(epochs, val_losses, label="Val Loss", marker="s", color="#ef4444")
+        axes[0].set_title("Multi-Task Loss Progression", fontsize=12, fontweight="bold")
+        axes[0].set_xlabel("Epoch")
+        axes[0].set_ylabel("Loss")
+        axes[0].grid(True, linestyle="--", alpha=0.6)
+        axes[0].legend()
+
+        # 2. Haversine Median Distance
+        axes[1].plot(epochs, median_dists, label="Median Error (km)", marker="^", color="#10b981")
+        axes[1].set_title("Validation Haversine Error (Median km)", fontsize=12, fontweight="bold")
+        axes[1].set_xlabel("Epoch")
+        axes[1].set_ylabel("Distance (km)")
+        axes[1].grid(True, linestyle="--", alpha=0.6)
+        axes[1].legend()
+
+        # 3. Accuracy thresholds
+        axes[2].plot(epochs, acc_200, label="Within 200 km (%)", marker="o", color="#8b5cf6")
+        axes[2].plot(epochs, acc_750, label="Within 750 km (%)", marker="d", color="#f59e0b")
+        axes[2].set_title("Prediction Accuracy @ Radius", fontsize=12, fontweight="bold")
+        axes[2].set_xlabel("Epoch")
+        axes[2].set_ylabel("Accuracy (%)")
+        axes[2].grid(True, linestyle="--", alpha=0.6)
+        axes[2].legend()
+
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=200)
+        plt.close()
+        print(f"[Visualizer] Training curves plot saved -> {save_path}")
+    except Exception as e:
+        print(f"[Visualizer] Plotting skipped: {e}")
+
 
 
 def _save_checkpoint(model, optimizer, scheduler, epoch, global_step, best_val_loss, history, path):
