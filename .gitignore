@@ -1,0 +1,21 @@
+# Large datasets & test images (available directly on Kaggle as input datasets)
+training_dataset/
+test_images_sampled/
+*.jpg
+*.png
+
+# Checkpoints & cached embeddings
+checkpoints/*.pt
+data/faiss_index.bin
+data/raster_cache/
+*.bin
+
+# Submissions output
+submissions/*.csv
+
+# Python cache & logs
+__pycache__/
+*.py[cod]
+*$py.class
+.ipynb_checkpoints/
+*.log
