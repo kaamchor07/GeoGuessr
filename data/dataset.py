@@ -179,15 +179,17 @@ class GeoDataset(Dataset):
         df["elevation_m"]    = df["elevation_m"].fillna(ELEVATION_MISSING).astype(float)
 
         # --- Stratified train/val split by geocell ---
+        # Guarantees that every class in val has at least 2 examples in train
         df = df.sample(frac=1, random_state=seed).reset_index(drop=True)
         val_idx = (
             df.groupby("geocell_id", group_keys=False)
-              .apply(lambda g: g.head(max(1, int(len(g) * val_frac))))
+              .apply(lambda g: g.head(int(len(g) * val_frac)) if len(g) >= 3 else g.head(0))
               .index
         )
         val_mask = df.index.isin(val_idx)
         df["_split"] = "train"
         df.loc[val_mask, "_split"] = "val"
+
 
         self.df = df[df["_split"] == split].reset_index(drop=True)
 

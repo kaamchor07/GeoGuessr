@@ -61,7 +61,7 @@ def xyz_to_latlon(xyz):
 # ---------------------------------------------------------------------------
 # KMeans clustering
 # ---------------------------------------------------------------------------
-def cluster_kmeans(coords_xyz, n_clusters: int, seed: int = 42):
+def cluster_kmeans(coords_xyz, n_clusters: int, min_cluster_size: int = 5, seed: int = 42):
     from sklearn.cluster import MiniBatchKMeans
 
     print(f"[KMeans] Fitting {n_clusters} clusters on {len(coords_xyz)} points …")
@@ -76,7 +76,34 @@ def cluster_kmeans(coords_xyz, n_clusters: int, seed: int = 42):
     labels = km.fit_predict(coords_xyz)
     centroids_xyz = km.cluster_centers_
     centroids_xyz /= np.linalg.norm(centroids_xyz, axis=1, keepdims=True)  # re-project to sphere
+
+    # Merge tiny clusters (< min_cluster_size) into nearest neighbor centroid
+    counts = pd.Series(labels).value_counts()
+    tiny_clusters = counts[counts < min_cluster_size].index.tolist()
+    if tiny_clusters:
+        print(f"[KMeans] Merging {len(tiny_clusters)} small clusters (<{min_cluster_size} points) into nearest neighbor...")
+        valid_clusters = [c for c in range(n_clusters) if c not in tiny_clusters]
+        valid_centroids = centroids_xyz[valid_clusters]
+
+        for tc in tiny_clusters:
+            mask = labels == tc
+            tc_pts = coords_xyz[mask]
+            # Find nearest valid centroid
+            dists = np.linalg.norm(tc_pts[:, None] - valid_centroids[None, :], axis=2)
+            nearest_valid_idx = np.argmin(dists, axis=1)
+            labels[mask] = [valid_clusters[idx] for idx in nearest_valid_idx]
+
+        # Re-index clusters to contiguous 0..N-1
+        unique_labels = sorted(set(labels))
+        label_map = {old: new for new, old in enumerate(unique_labels)}
+        labels = np.array([label_map[l] for l in labels])
+        # Recompute centroids
+        centroids_xyz = np.array([coords_xyz[labels == l].mean(axis=0) for l in range(len(unique_labels))])
+        centroids_xyz /= np.linalg.norm(centroids_xyz, axis=1, keepdims=True)
+        print(f"[KMeans] Final cluster count after merging: {len(unique_labels)}")
+
     return labels, centroids_xyz
+
 
 
 # ---------------------------------------------------------------------------

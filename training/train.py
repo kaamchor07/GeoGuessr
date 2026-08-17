@@ -85,6 +85,10 @@ def validate(model, val_loader, criterion, device, centroids_df):
     all_true_lats, all_true_lons = [], []
     n_batches = 0
 
+    all_true_cells, all_pred_cells = [], []
+    all_top5_cells = []
+    all_true_countries, all_pred_countries = [], []
+
     for batch in val_loader:
         images = batch["image"].to(device, non_blocking=True)
         outputs = model(images) if not isinstance(model, nn.DataParallel) else model(images)
@@ -93,8 +97,15 @@ def validate(model, val_loader, criterion, device, centroids_df):
         total_loss += losses["loss"].item()
         n_batches += 1
 
-        # Geocell prediction -> lat/lon via centroid lookup
-        pred_cells = outputs["geocell_logits"].argmax(dim=-1).cpu().numpy()
+        # Geocell predictions (Top-1 and Top-5)
+        gc_logits = outputs["geocell_logits"]
+        pred_cells = gc_logits.argmax(dim=-1).cpu().numpy()
+        top5_cells = torch.topk(gc_logits, k=min(5, gc_logits.shape[-1]), dim=-1).indices.cpu().numpy()
+
+        # Country predictions
+        ct_logits = outputs["country_logits"]
+        pred_countries = ct_logits.argmax(dim=-1).cpu().numpy()
+
         pred_lats = centroids_df["centroid_lat"].values[pred_cells]
         pred_lons = centroids_df["centroid_lon"].values[pred_cells]
 
@@ -102,6 +113,23 @@ def validate(model, val_loader, criterion, device, centroids_df):
         all_pred_lons.extend(pred_lons)
         all_true_lats.extend(batch["latitude"].numpy())
         all_true_lons.extend(batch["longitude"].numpy())
+
+        all_true_cells.extend(batch["geocell_id"].numpy())
+        all_pred_cells.extend(pred_cells)
+        all_top5_cells.extend(top5_cells)
+        all_true_countries.extend(batch["country_idx"].numpy())
+        all_pred_countries.extend(pred_countries)
+
+    # Accuracy metrics
+    all_true_cells = np.array(all_true_cells)
+    all_pred_cells = np.array(all_pred_cells)
+    all_top5_cells = np.array(all_top5_cells)
+    all_true_countries = np.array(all_true_countries)
+    all_pred_countries = np.array(all_pred_countries)
+
+    geocell_top1 = float((all_true_cells == all_pred_cells).mean())
+    geocell_top5 = float(np.mean([all_true_cells[i] in all_top5_cells[i] for i in range(len(all_true_cells))]))
+    country_top1 = float((all_true_countries == all_pred_countries).mean())
 
     # Haversine distances
     all_pred_lats = np.array(all_pred_lats)
@@ -112,6 +140,9 @@ def validate(model, val_loader, criterion, device, centroids_df):
 
     metrics = {
         "val_loss":          total_loss / max(n_batches, 1),
+        "country_top1":      country_top1,
+        "geocell_top1":      geocell_top1,
+        "geocell_top5":      geocell_top5,
         "haversine_median":  float(np.median(dists)),
         "haversine_mean":    float(np.mean(dists)),
         "haversine_p25":     float(np.percentile(dists, 25)),
@@ -122,6 +153,7 @@ def validate(model, val_loader, criterion, device, centroids_df):
     }
     model.train()
     return metrics
+
 
 
 # ---------------------------------------------------------------------------
@@ -285,10 +317,13 @@ def train(args):
         print(f"\n[Epoch {epoch+1}] "
               f"train_loss={epoch_train_loss:.4f} | "
               f"val_loss={val_metrics['val_loss']:.4f} | "
+              f"country_acc={val_metrics['country_top1']*100:.1f}% | "
+              f"geocell_top1={val_metrics['geocell_top1']*100:.1f}% | "
+              f"geocell_top5={val_metrics['geocell_top5']*100:.1f}% | "
               f"median_dist={val_metrics['haversine_median']:.1f}km | "
-              f"within_25km={val_metrics['within_25km']*100:.1f}% | "
               f"within_200km={val_metrics['within_200km']*100:.1f}% | "
               f"time={epoch_time:.0f}s\n")
+
 
         record = {"epoch": epoch + 1, "train_loss": epoch_train_loss, **val_metrics}
         history.append(record)
