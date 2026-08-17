@@ -32,7 +32,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from models.model import GeoLocModel
-from data.dataset import TestDataset, BACKBONE_SIZE, WATERMARK_X0, WATERMARK_X1, WATERMARK_Y0, WATERMARK_Y1
+from data.dataset import (
+    TestDataset, BACKBONE_SIZE, WATERMARK_X0, WATERMARK_X1, WATERMARK_Y0, WATERMARK_Y1, find_test_images_path
+)
 
 DATA_DIR = ROOT / "data"
 SUBMISSIONS_DIR = ROOT / "submissions"
@@ -45,7 +47,7 @@ class TTATestDataset(TestDataset):
     No horizontal flips to preserve driving-side and text cues.
     """
 
-    def __init__(self, test_dir: Path = ROOT / "test_images_sampled"):
+    def __init__(self, test_dir: Path = None):
         super().__init__(test_dir)
         clip_mean = [0.48145466, 0.4578275, 0.40821073]
         clip_std  = [0.26862954, 0.26130258, 0.27577711]
@@ -79,7 +81,7 @@ class TTATestDataset(TestDataset):
 
 def generate_submission(
     checkpoint_path: str = None,
-    test_dir: str = str(ROOT / "test_images_sampled"),
+    test_dir: str = None,
     sample_sub_path: str = str(ROOT / "sample_submission.csv"),
     output_csv_path: str = None,
     use_tta: bool = True,
@@ -90,6 +92,12 @@ def generate_submission(
 ):
     device = torch.device(device_str)
     print(f"[Inference] Running on {device}")
+
+    if test_dir is None:
+        test_dir = find_test_images_path()
+    test_dir = Path(test_dir)
+    print(f"[Inference] Using test images from: {test_dir}")
+
 
     # 1. Load Geocell and Country lookups
     centroids_df = pd.read_csv(DATA_DIR / "geocell_centroids.csv").sort_values("geocell_id").reset_index(drop=True)
@@ -257,7 +265,7 @@ def generate_submission(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=str, default=None)
-    parser.add_argument("--test_dir", type=str, default=str(ROOT / "test_images_sampled"))
+    parser.add_argument("--test_dir", type=str, default=None)
     parser.add_argument("--out_csv", type=str, default=None)
     parser.add_argument("--no_tta", action="store_true")
     parser.add_argument("--no_knn", action="store_true")
