@@ -48,14 +48,43 @@ def latlon_to_xyz(lat_deg, lon_deg):
     x = np.cos(lat) * np.cos(lon)
     y = np.cos(lat) * np.sin(lon)
     z = np.sin(lat)
-    return np.stack([x, y, z], axis=1)
+    return np.stack([x, y, z], axis=-1)
 
 
 def xyz_to_latlon(xyz):
-    x, y, z = xyz[:, 0], xyz[:, 1], xyz[:, 2]
-    lat = np.degrees(np.arcsin(np.clip(z, -1, 1)))
+    x, y, z = xyz[..., 0], xyz[..., 1], xyz[..., 2]
+    lat = np.degrees(np.arcsin(np.clip(z, -1.0, 1.0)))
     lon = np.degrees(np.arctan2(y, x))
     return lat, lon
+
+
+def spherical_weighted_average(lats_deg: np.ndarray, lons_deg: np.ndarray, weights: np.ndarray = None) -> tuple[float, float]:
+    """
+    Computes the true spherical weighted mean on the 3D unit sphere.
+    Avoids antimeridian wrapping and high-latitude distortions.
+    """
+    lats_deg = np.asarray(lats_deg, dtype=np.float64)
+    lons_deg = np.asarray(lons_deg, dtype=np.float64)
+
+    if weights is None:
+        weights = np.ones_like(lats_deg, dtype=np.float64)
+    else:
+        weights = np.asarray(weights, dtype=np.float64)
+
+    weights = weights / (np.sum(weights) + 1e-12)
+
+    xyz = latlon_to_xyz(lats_deg, lons_deg)  # [N, 3]
+    avg_xyz = np.sum(xyz * weights[:, None], axis=0)  # [3]
+    norm = np.linalg.norm(avg_xyz)
+    if norm < 1e-6:
+        # Opposite poles cancel out -> fallback to highest weight point
+        best_idx = np.argmax(weights)
+        return float(lats_deg[best_idx]), float(lons_deg[best_idx])
+
+    avg_xyz /= norm
+    lat_out, lon_out = xyz_to_latlon(avg_xyz[None, :])
+    return float(lat_out[0]), float(lon_out[0])
+
 
 
 # ---------------------------------------------------------------------------

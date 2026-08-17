@@ -167,6 +167,12 @@ def train(args):
         for i in range(torch.cuda.device_count()):
             print(f"  GPU {i}: {torch.cuda.get_device_name(i)}")
 
+    # Checkpoint output directory
+    ckpt_dir = CKPT_DIR if not args.run_name else (CKPT_DIR / args.run_name)
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Checkpoints directory: {ckpt_dir}")
+
+
     # --- Data ---
     print("\nLoading datasets...")
     max_train = args.max_samples if args.dry_run else None
@@ -307,7 +313,7 @@ def train(args):
             # Checkpoint every N steps
             if args.ckpt_every_steps > 0 and global_step % args.ckpt_every_steps == 0:
                 _save_checkpoint(model, optimizer, scheduler, epoch, global_step,
-                                 best_val_loss, history, CKPT_DIR / "last.pt")
+                                 best_val_loss, history, ckpt_dir / "last.pt")
 
         # --- End of epoch ---
         epoch_train_loss = np.mean(epoch_losses)
@@ -332,20 +338,25 @@ def train(args):
         if is_best:
             best_val_loss = val_metrics["val_loss"]
             _save_checkpoint(model, optimizer, scheduler, epoch, global_step,
-                             best_val_loss, history, CKPT_DIR / "best.pt")
+                             best_val_loss, history, ckpt_dir / "best.pt")
+            # Also keep root checkpoints/best.pt updated as latest
+            if ckpt_dir != CKPT_DIR:
+                _save_checkpoint(model, optimizer, scheduler, epoch, global_step,
+                                 best_val_loss, history, CKPT_DIR / "best.pt")
             print(f"  -> New best model saved (val_loss={best_val_loss:.4f})")
 
         _save_checkpoint(model, optimizer, scheduler, epoch, global_step,
-                         best_val_loss, history, CKPT_DIR / "last.pt")
+                         best_val_loss, history, ckpt_dir / "last.pt")
 
     # Save training history
-    hist_path = CKPT_DIR / "history.json"
+    hist_path = ckpt_dir / "history.json"
     with open(hist_path, "w") as f:
         json.dump(history, f, indent=2)
     print(f"\nTraining complete. History saved to {hist_path}")
 
     # Plot metrics
-    plot_training_curves(history, CKPT_DIR / "training_metrics.png")
+    plot_training_curves(history, ckpt_dir / "training_metrics.png")
+
 
     # --- Final summary ---
     if history:
@@ -423,9 +434,11 @@ def _save_checkpoint(model, optimizer, scheduler, epoch, global_step, best_val_l
 def get_parser():
     p = argparse.ArgumentParser()
     # Mode
+    p.add_argument("--run_name",   type=str, default=None, help="Distinct subfolder name under checkpoints/")
     p.add_argument("--dry_run",    action="store_true", help="Quick 1-epoch test on 200 images")
     p.add_argument("--max_samples", type=int, default=200)
     p.add_argument("--resume",     type=str, default=None)
+
     # Data
     p.add_argument("--val_frac",   type=float, default=0.1)
     p.add_argument("--batch_size", type=int, default=16)

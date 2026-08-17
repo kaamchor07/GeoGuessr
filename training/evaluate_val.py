@@ -35,6 +35,9 @@ from calibration.scoring_proxy import haversine_km, compute_competition_score
 DATA_DIR = ROOT / "data"
 
 
+from geocells.build_geocells import spherical_weighted_average
+
+
 def evaluate_checkpoint(
     checkpoint_path: str = "checkpoints/best.pt",
     batch_size: int = 64,
@@ -74,6 +77,7 @@ def evaluate_checkpoint(
     all_soft_pred_lats, all_soft_pred_lons = [], []
     all_pred_cells, all_top5_cells = [], []
     all_pred_countries, all_country_confs = [], []
+    all_image_ids = []
     all_embeddings = []
     base_radii = []
 
@@ -91,7 +95,7 @@ def evaluate_checkpoint(
             pred_gc = gc_logits.argmax(dim=-1).cpu().numpy()
             top5_gc = torch.topk(gc_logits, k=min(5, gc_logits.shape[-1]), dim=-1).indices.cpu().numpy()
 
-            # 2. Soft top-K centroid blending (weighted average over top 5 cells)
+            # 2. Spherical Top-K centroid blending on 3D unit sphere
             top5_probs = F.softmax(torch.topk(gc_logits, k=5, dim=-1).values, dim=-1).cpu().numpy()
             top5_indices = top5_gc
             batch_soft_lats = np.zeros(len(imgs))
@@ -99,13 +103,15 @@ def evaluate_checkpoint(
             for i in range(len(imgs)):
                 c_lats = centroids_df["centroid_lat"].values[top5_indices[i]]
                 c_lons = centroids_df["centroid_lon"].values[top5_indices[i]]
-                batch_soft_lats[i] = np.sum(c_lats * top5_probs[i])
-                batch_soft_lons[i] = np.sum(c_lons * top5_probs[i])
+                s_lat, s_lon = spherical_weighted_average(c_lats, c_lons, top5_probs[i])
+                batch_soft_lats[i] = s_lat
+                batch_soft_lons[i] = s_lon
 
             # Country prediction
             ct_probs = F.softmax(ct_logits, dim=-1)
             ct_conf, ct_idx = ct_probs.max(dim=-1)
 
+            all_image_ids.extend(batch["image_id"])
             all_true_lats.extend(batch["latitude"].numpy())
             all_true_lons.extend(batch["longitude"].numpy())
             all_true_cells.extend(batch["geocell_id"].numpy())
@@ -122,6 +128,7 @@ def evaluate_checkpoint(
             all_pred_countries.extend([idx2country.get(i, "UNK") for i in ct_idx.cpu().numpy()])
             all_country_confs.extend(ct_conf.cpu().numpy())
             all_embeddings.append(embeds.cpu().numpy())
+
 
     true_lats = np.array(all_true_lats)
     true_lons = np.array(all_true_lons)
@@ -206,6 +213,26 @@ def evaluate_checkpoint(
     )
 
     print("\n" + "=" * 65)
+    print("  SAMPLE VALIDATION PREDICTIONS (First 5 Images)")
+    print("=" * 65)
+    for i in range(min(5, len(true_lats))):
+        img_id = all_image_ids[i]
+        t_lat, t_lon = true_lats[i], true_lons[i]
+        r_lat, r_lon = all_raw_pred_lats[i], all_raw_pred_lons[i]
+        s_lat, s_lon = all_soft_pred_lats[i], all_soft_pred_lons[i]
+        k_lat, k_lon = refined_lats[i], refined_lons[i]
+
+        d_raw = haversine_km(np.array([t_lat]), np.array([t_lon]), np.array([r_lat]), np.array([r_lon]))[0]
+        d_soft = haversine_km(np.array([t_lat]), np.array([t_lon]), np.array([s_lat]), np.array([s_lon]))[0]
+        d_knn = haversine_km(np.array([t_lat]), np.array([t_lon]), np.array([k_lat]), np.array([k_lon]))[0]
+
+        print(f"\n[Sample #{i+1}] Image: {img_id}")
+        print(f"  True Coords:         ({t_lat:8.4f}, {t_lon:9.4f}) | Country: {all_true_countries[i]}")
+        print(f"  Stage 1 (Raw):       ({r_lat:8.4f}, {r_lon:9.4f}) | Error: {d_raw:7.1f} km")
+        print(f"  Stage 2 (Soft 3D):   ({s_lat:8.4f}, {s_lon:9.4f}) | Error: {d_soft:7.1f} km (delta: {d_soft - d_raw:+6.1f} km)")
+        print(f"  Stage 3 (kNN 3D):    ({k_lat:8.4f}, {k_lon:9.4f}) | Error: {d_knn:7.1f} km (delta: {d_knn - d_soft:+6.1f} km)")
+
+    print("\n" + "=" * 65)
     print("  HAVERSINE DISTANCE PROGRESSION BY STAGE")
     print("=" * 65)
     print(f"  Stage 1 (Raw Argmax Centroid):     Median = {np.median(dists_raw):.1f} km | Mean = {np.mean(dists_raw):.1f} km | <750km = {(dists_raw < 750).mean()*100:.1f}%")
@@ -215,6 +242,7 @@ def evaluate_checkpoint(
     print(f"\n  Competition Proxy Median Score:   {score_res['median_score']:.4f}")
     print(f"  Competition Proxy Coverage Rate:   {score_res['coverage_rate']*100:.1f}%")
     print("=" * 65)
+
 
 
 if __name__ == "__main__":
