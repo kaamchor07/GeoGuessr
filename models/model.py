@@ -337,10 +337,10 @@ class GeoLoss(nn.Module):
         sigma_km: float = 500.0,
         w_geocell: float    = 1.0,
         w_country: float    = 0.5,
-        w_koppen: float     = 0.2,
-        w_worldcover: float = 0.2,
-        w_elevation: float  = 0.1,
-        w_domain: float     = 0.3,
+        w_koppen: float     = 0.05,    # conservative: aux regularizer, doesn't hijack primary task
+        w_worldcover: float = 0.05,    # conservative
+        w_elevation: float  = 0.02,    # conservative
+        w_domain: float     = 0.05,    # conservative
         elev_scale: float   = 1000.0,  # normalise elevation in metres
     ):
         super().__init__()

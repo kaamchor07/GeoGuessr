@@ -88,6 +88,13 @@ def validate(model, val_loader, criterion, device, centroids_df):
     all_true_cells, all_pred_cells = [], []
     all_top5_cells = []
     all_true_countries, all_pred_countries = [], []
+    
+    val_loss_gc = 0.0
+    val_loss_co = 0.0
+    val_loss_kp = 0.0
+    val_loss_wc = 0.0
+    val_loss_el = 0.0
+    val_loss_dm = 0.0
 
     for batch in val_loader:
         images = batch["image"].to(device, non_blocking=True)
@@ -95,6 +102,12 @@ def validate(model, val_loader, criterion, device, centroids_df):
 
         losses = criterion(outputs, batch)
         total_loss += losses["loss"].item()
+        val_loss_gc += losses.get("loss_geocell", torch.tensor(0.0)).item()
+        val_loss_co += losses.get("loss_country", torch.tensor(0.0)).item()
+        val_loss_kp += losses.get("loss_koppen", torch.tensor(0.0)).item()
+        val_loss_wc += losses.get("loss_worldcover", torch.tensor(0.0)).item()
+        val_loss_el += losses.get("loss_elevation", torch.tensor(0.0)).item()
+        val_loss_dm += losses.get("loss_domain", torch.tensor(0.0)).item()
         n_batches += 1
 
         # Geocell predictions (Top-1 and Top-5)
@@ -138,8 +151,15 @@ def validate(model, val_loader, criterion, device, centroids_df):
     all_true_lons = np.array(all_true_lons)
     dists = haversine_km(all_true_lats, all_true_lons, all_pred_lats, all_pred_lons)
 
+    nb = max(n_batches, 1)
     metrics = {
-        "val_loss":          total_loss / max(n_batches, 1),
+        "val_loss":          total_loss / nb,
+        "val_loss_gc":       val_loss_gc / nb,
+        "val_loss_co":       val_loss_co / nb,
+        "val_loss_kp":       val_loss_kp / nb,
+        "val_loss_wc":       val_loss_wc / nb,
+        "val_loss_el":       val_loss_el / nb,
+        "val_loss_dm":       val_loss_dm / nb,
         "country_top1":      country_top1,
         "geocell_top1":      geocell_top1,
         "geocell_top5":      geocell_top5,
@@ -275,6 +295,12 @@ def train(args):
     for epoch in range(start_epoch, args.epochs):
         model.train()
         epoch_losses = []
+        epoch_losses_gc = []
+        epoch_losses_co = []
+        epoch_losses_kp = []
+        epoch_losses_wc = []
+        epoch_losses_el = []
+        epoch_losses_dm = []
         epoch_start = time.time()
 
         for step, batch in enumerate(train_loader):
@@ -305,6 +331,12 @@ def train(args):
             scheduler.step()
             global_step += 1
             epoch_losses.append(loss.item())
+            epoch_losses_gc.append(losses.get("loss_geocell", torch.tensor(0.0)).item())
+            epoch_losses_co.append(losses.get("loss_country", torch.tensor(0.0)).item())
+            epoch_losses_kp.append(losses.get("loss_koppen", torch.tensor(0.0)).item())
+            epoch_losses_wc.append(losses.get("loss_worldcover", torch.tensor(0.0)).item())
+            epoch_losses_el.append(losses.get("loss_elevation", torch.tensor(0.0)).item())
+            epoch_losses_dm.append(losses.get("loss_domain", torch.tensor(0.0)).item())
 
             # Log every 10 steps
             if (step + 1) % max(1, min(10, len(train_loader) // 5)) == 0 or step == 0:
@@ -312,8 +344,10 @@ def train(args):
                 print(
                     f"  Ep {epoch+1}/{args.epochs} | Step {step+1}/{len(train_loader)} | "
                     f"Loss: {loss.item():.4f} "
-                    f"(gc={losses['loss_geocell'].item():.3f} "
-                    f"co={losses['loss_country'].item():.3f}) | "
+                    f"[gc={losses['loss_geocell'].item():.3f} "
+                    f"co={losses['loss_country'].item():.3f} "
+                    f"kp={losses['loss_koppen'].item():.3f} "
+                    f"wc={losses['loss_worldcover'].item():.3f}] | "
                     f"LR: {lr_now:.2e} | GRL-alpha: {alpha:.3f}"
                 )
 
@@ -324,12 +358,20 @@ def train(args):
 
         # --- End of epoch ---
         epoch_train_loss = np.mean(epoch_losses)
+        train_breakdown = {
+            "train_loss_gc": float(np.mean(epoch_losses_gc)),
+            "train_loss_co": float(np.mean(epoch_losses_co)),
+            "train_loss_kp": float(np.mean(epoch_losses_kp)),
+            "train_loss_wc": float(np.mean(epoch_losses_wc)),
+            "train_loss_el": float(np.mean(epoch_losses_el)),
+            "train_loss_dm": float(np.mean(epoch_losses_dm)),
+        }
         val_metrics = validate(model, val_loader, criterion, device, centroids_df)
         epoch_time = time.time() - epoch_start
 
-        print(f"\n[Epoch {epoch+1}] "
-              f"train_loss={epoch_train_loss:.4f} | "
-              f"val_loss={val_metrics['val_loss']:.4f} | "
+        print(f"\n[Epoch {epoch+1}/{args.epochs}] "
+              f"train_loss={epoch_train_loss:.4f} (gc={train_breakdown['train_loss_gc']:.3f} co={train_breakdown['train_loss_co']:.3f} kp={train_breakdown['train_loss_kp']:.3f}) | "
+              f"val_loss={val_metrics['val_loss']:.4f} (gc={val_metrics['val_loss_gc']:.3f} co={val_metrics['val_loss_co']:.3f}) | "
               f"country_acc={val_metrics['country_top1']*100:.1f}% | "
               f"geocell_top1={val_metrics['geocell_top1']*100:.1f}% | "
               f"geocell_top5={val_metrics['geocell_top5']*100:.1f}% | "
@@ -337,8 +379,7 @@ def train(args):
               f"within_200km={val_metrics['within_200km']*100:.1f}% | "
               f"time={epoch_time:.0f}s\n")
 
-
-        record = {"epoch": epoch + 1, "train_loss": epoch_train_loss, **val_metrics}
+        record = {"epoch": epoch + 1, "train_loss": epoch_train_loss, **train_breakdown, **val_metrics}
         history.append(record)
 
         is_best = val_metrics["val_loss"] < best_val_loss
@@ -467,10 +508,10 @@ def get_parser():
     p.add_argument("--sigma_km",   type=float, default=500.0)
     p.add_argument("--w_geocell",  type=float, default=1.0)
     p.add_argument("--w_country",  type=float, default=0.5)
-    p.add_argument("--w_koppen",   type=float, default=0.2)
-    p.add_argument("--w_worldcover", type=float, default=0.2)
-    p.add_argument("--w_elevation", type=float, default=0.1)
-    p.add_argument("--w_domain",   type=float, default=0.3)
+    p.add_argument("--w_koppen",   type=float, default=0.05, help="Weight for Köppen climate loss (conservative regularizer)")
+    p.add_argument("--w_worldcover", type=float, default=0.05, help="Weight for WorldCover land-cover loss")
+    p.add_argument("--w_elevation", type=float, default=0.02, help="Weight for elevation regression loss")
+    p.add_argument("--w_domain",   type=float, default=0.05, help="Weight for GRL domain adversarial loss")
     # Training
     p.add_argument("--epochs",     type=int, default=1)
     p.add_argument("--lr",         type=float, default=3e-4)
