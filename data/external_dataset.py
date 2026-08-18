@@ -77,7 +77,7 @@ def deduplicate_gps(
     int_lats = pd.to_numeric(int_df["latitude"], errors="coerce").values
     int_lons = pd.to_numeric(int_df["longitude"], errors="coerce").values
     valid_int = ~np.isnan(int_lats) & ~np.isnan(int_lons)
-    int_xyz = np.stack(latlon_to_xyz(int_lats[valid_int], int_lons[valid_int]), axis=1).astype(np.float64)
+    int_xyz = latlon_to_xyz(int_lats[valid_int], int_lons[valid_int]).astype(np.float64)
 
     # Clean candidate df
     cand_df_clean = candidate_df.copy()
@@ -94,7 +94,7 @@ def deduplicate_gps(
 
     cand_lats = cand_df_clean["latitude"].values
     cand_lons = cand_df_clean["longitude"].values
-    cand_xyz = np.stack(latlon_to_xyz(cand_lats, cand_lons), axis=1).astype(np.float64)
+    cand_xyz = latlon_to_xyz(cand_lats, cand_lons).astype(np.float64)
 
     tree = cKDTree(int_xyz)
     chord_dist = 2.0 * np.sin((distance_threshold_km / 6371.0) / 2.0)
@@ -131,8 +131,8 @@ def assign_geocells_and_countries(
     df = df[df["country_idx"] > 0].reset_index(drop=True)
 
     # 2. Geocell assignment via nearest 3D centroid
-    c_xyz = np.stack(latlon_to_xyz(centroids_df["centroid_lat"].values, centroids_df["centroid_lon"].values), axis=1)
-    p_xyz = np.stack(latlon_to_xyz(df["latitude"].values, df["longitude"].values), axis=1)
+    c_xyz = latlon_to_xyz(centroids_df["centroid_lat"].values, centroids_df["centroid_lon"].values).astype(np.float64)
+    p_xyz = latlon_to_xyz(df["latitude"].values, df["longitude"].values).astype(np.float64)
 
     tree = cKDTree(c_xyz)
     _, nearest_idx = tree.query(p_xyz, k=1)

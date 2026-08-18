@@ -57,8 +57,8 @@ def deduplicate_against_internal(
     int_lons = internal_df["longitude"].values
 
     # Convert to 3D unit sphere coords
-    int_xyz = np.stack(latlon_to_xyz(int_lats, int_lons), axis=1)
-    cand_xyz = np.stack(latlon_to_xyz(candidate_lats, candidate_lons), axis=1)
+    int_xyz = latlon_to_xyz(int_lats, int_lons).astype(np.float64)
+    cand_xyz = latlon_to_xyz(candidate_lats, candidate_lons).astype(np.float64)
 
     tree = cKDTree(int_xyz)
     # Chord length for threshold_km on Earth of radius 6371 km
@@ -88,9 +88,9 @@ def map_to_nearest_geocell(
     centroids_df = pd.read_csv(centroids_csv).sort_values("geocell_id").reset_index(drop=True)
     c_lats = centroids_df["centroid_lat"].values
     c_lons = centroids_df["centroid_lon"].values
-    c_xyz = np.stack(latlon_to_xyz(c_lats, c_lons), axis=1)
+    c_xyz = latlon_to_xyz(c_lats, c_lons).astype(np.float64)
 
-    pts_xyz = np.stack(latlon_to_xyz(lats, lons), axis=1)
+    pts_xyz = latlon_to_xyz(lats, lons).astype(np.float64)
     tree = cKDTree(c_xyz)
     _, nearest_indices = tree.query(pts_xyz, k=1)
     return centroids_df["geocell_id"].values[nearest_indices]
