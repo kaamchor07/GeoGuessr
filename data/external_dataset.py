@@ -137,9 +137,6 @@ def assign_geocells_and_countries(
 def download_and_package_osv5m(
     num_samples: int = 60000,
     output_dir: Path = None,
-def download_and_package_osv5m(
-    num_samples: int = 60000,
-    output_dir: Path = None,
     hf_dataset_name: str = "osv5m/osv5m",
     max_per_country: int = 3500,       # prevents single country dominance
     priority_boost_factor: int = 3,    # boosts weak countries
