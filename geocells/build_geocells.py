@@ -178,15 +178,91 @@ def cluster_optics(coords_xyz, min_samples: int, xi: float = 0.05, seed: int = 4
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
-def main():
-    parser = argparse.ArgumentParser(description="Build geocells from training coordinates")
-    parser.add_argument("--coords_csv", type=str, default=str(COORDS_CSV))
-    parser.add_argument(
-        "--method",
-        choices=["kmeans", "optics"],
-        default="kmeans",
-        help="Clustering algorithm (default: kmeans)",
+# Main geocell construction entry point
+# ---------------------------------------------------------------------------
+def build_geocells(
+    coords_csv: Path = None,
+    n_clusters: int = 1000,
+    method: str = "kmeans",
+    min_cluster_size: int = 3,
+    min_samples: int = 10,
+    xi: float = 0.05,
+    seed: int = 42,
+    out_assignments: Path = None,
+    out_centroids: Path = None,
+):
+    if coords_csv is None:
+        coords_csv = COORDS_CSV
+    if out_assignments is None:
+        out_assignments = DATA_DIR / "geocell_assignments.csv"
+    if out_centroids is None:
+        out_centroids = DATA_DIR / "geocell_centroids.csv"
+
+    np.random.seed(seed)
+
+    print(f"Loading coordinates from {coords_csv}")
+    df = pd.read_csv(coords_csv)
+    assert "image_id" in df.columns and "latitude" in df.columns and "longitude" in df.columns, (
+        "CSV must have columns: image_id, latitude, longitude"
     )
+    print(f"  {len(df)} rows loaded")
+
+    # Encode to unit-sphere XYZ (handles lon wrap-around cleanly)
+    coords_xyz = latlon_to_xyz(df["latitude"].values, df["longitude"].values)
+
+    # Cluster
+    if method == "kmeans":
+        labels, centroids_xyz = cluster_kmeans(
+            coords_xyz,
+            n_clusters=n_clusters,
+            min_cluster_size=min_cluster_size,
+            seed=seed,
+        )
+    else:
+        labels, centroids_xyz = cluster_optics(coords_xyz, min_samples, xi, seed)
+
+    n_cells = len(np.unique(labels))
+    print(f"Total geocells: {n_cells}")
+
+    # Save assignments
+    df_out = df.copy()
+    df_out["geocell_id"] = labels
+    df_out.to_csv(out_assignments, index=False)
+    print(f"Saved assignments -> {out_assignments}")
+
+    # Compute and save centroids
+    centroid_lats, centroid_lons = xyz_to_latlon(centroids_xyz)
+    counts = df_out.groupby("geocell_id").size().reset_index(name="count")
+    centroids_df = pd.DataFrame(
+        {
+            "geocell_id": np.arange(n_cells),
+            "centroid_lat": centroid_lats,
+            "centroid_lon": centroid_lons,
+        }
+    ).merge(counts, on="geocell_id", how="left")
+    centroids_df["count"] = centroids_df["count"].fillna(0).astype(int)
+
+    # Compute median haversine radius of each cell (p90 error proxy)
+    radii = []
+    for gid, grp in df_out.groupby("geocell_id"):
+        c_lat = centroid_lats[gid]
+        c_lon = centroid_lons[gid]
+        dist = haversine_km(grp["latitude"].values, grp["longitude"].values, c_lat, c_lon)
+        radii.append(dist.max())
+    centroids_df["max_radius_km"] = radii
+    centroids_df.to_csv(out_centroids, index=False)
+    print(f"Saved centroids  -> {out_centroids}")
+
+    print(f"\nMedian cell max-radius: {np.median(radii):.1f} km")
+    print(f"P90   cell max-radius: {np.percentile(radii, 90):.1f} km")
+    print(f"Max   cell max-radius: {np.max(radii):.1f} km")
+    return df_out, centroids_df
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Cluster training coords into geocells")
+    parser.add_argument("--coords_csv", type=str, default=str(COORDS_CSV))
+    parser.add_argument("--method", choices=["kmeans", "optics"], default="kmeans")
     parser.add_argument("--n_clusters", type=int, default=1000, help="[kmeans] number of clusters")
     parser.add_argument(
         "--min_samples",
@@ -208,74 +284,18 @@ def main():
     )
     args = parser.parse_args()
 
-    np.random.seed(args.seed)
-
-    # Load
-    print(f"Loading coordinates from {args.coords_csv}")
-    df = pd.read_csv(args.coords_csv)
-    assert "image_id" in df.columns and "latitude" in df.columns and "longitude" in df.columns, (
-        "CSV must have columns: image_id, latitude, longitude"
+    build_geocells(
+        coords_csv=args.coords_csv,
+        n_clusters=args.n_clusters,
+        method=args.method,
+        min_cluster_size=args.min_cluster_size,
+        min_samples=args.min_samples,
+        seed=args.seed,
+        out_assignments=args.out_assignments,
+        out_centroids=args.out_centroids,
     )
-    print(f"  {len(df)} rows loaded")
-
-    # Encode to unit-sphere XYZ (handles lon wrap-around cleanly)
-    coords_xyz = latlon_to_xyz(df["latitude"].values, df["longitude"].values)
-
-    # Cluster
-    if args.method == "kmeans":
-        labels, centroids_xyz = cluster_kmeans(
-            coords_xyz,
-            n_clusters=args.n_clusters,
-            min_cluster_size=args.min_cluster_size,
-            seed=args.seed,
-        )
-    else:
-        labels, centroids_xyz = cluster_optics(coords_xyz, args.min_samples, args.xi, args.seed)
-
-
-    n_cells = len(np.unique(labels))
-    print(f"Total geocells: {n_cells}")
-
-    # Save assignments
-    df_out = df.copy()
-    df_out["geocell_id"] = labels
-    df_out.to_csv(args.out_assignments, index=False)
-    print(f"Saved assignments -> {args.out_assignments}")
-
-    # Compute and save centroids
-    centroid_lats, centroid_lons = xyz_to_latlon(centroids_xyz)
-    counts = df_out.groupby("geocell_id").size().reset_index(name="count")
-    centroids_df = pd.DataFrame(
-        {
-            "geocell_id": np.arange(n_cells),
-            "centroid_lat": centroid_lats,
-            "centroid_lon": centroid_lons,
-        }
-    ).merge(counts, on="geocell_id", how="left")
-    centroids_df["count"] = centroids_df["count"].fillna(0).astype(int)
-    centroids_df.to_csv(args.out_centroids, index=False)
-    print(f"Saved centroids  -> {args.out_centroids}")
-
-    # Quick stats
-    print("\n=== Geocell stats ===")
-    print(centroids_df["count"].describe().to_string())
-
-    # Compute median haversine radius of each cell (p90 error proxy)
-    print("\nComputing per-cell radius stats …")
-    radii = []
-    for gid, grp in df_out.groupby("geocell_id"):
-        c_lat = centroid_lats[gid]
-        c_lon = centroid_lons[gid]
-        dist = haversine_km(grp["latitude"].values, grp["longitude"].values, c_lat, c_lon)
-        radii.append(dist.max())
-    centroids_df["max_radius_km"] = radii
-    centroids_df.to_csv(args.out_centroids, index=False)
-
-    print(f"\nMedian cell max-radius: {np.median(radii):.1f} km")
-    print(f"P90   cell max-radius: {np.percentile(radii, 90):.1f} km")
-    print(f"Max   cell max-radius: {np.max(radii):.1f} km")
-    print("\nDone.")
 
 
 if __name__ == "__main__":
     main()
+
