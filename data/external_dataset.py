@@ -73,12 +73,28 @@ def deduplicate_gps(
         internal_coords_csv = auto_coords
 
     print(f"[External Dataset] Loading internal ground truth reference from {internal_coords_csv}...")
-    int_df = pd.read_csv(internal_coords_csv)
-    int_xyz = np.stack(latlon_to_xyz(int_df["latitude"].values, int_df["longitude"].values), axis=1)
+    int_df = pd.read_csv(internal_coords_csv).dropna(subset=["latitude", "longitude"])
+    int_lats = pd.to_numeric(int_df["latitude"], errors="coerce").values
+    int_lons = pd.to_numeric(int_df["longitude"], errors="coerce").values
+    valid_int = ~np.isnan(int_lats) & ~np.isnan(int_lons)
+    int_xyz = np.stack(latlon_to_xyz(int_lats[valid_int], int_lons[valid_int]), axis=1).astype(np.float64)
 
-    cand_lats = candidate_df["latitude"].values
-    cand_lons = candidate_df["longitude"].values
-    cand_xyz = np.stack(latlon_to_xyz(cand_lats, cand_lons), axis=1)
+    # Clean candidate df
+    cand_df_clean = candidate_df.copy()
+    cand_df_clean["latitude"] = pd.to_numeric(cand_df_clean["latitude"], errors="coerce")
+    cand_df_clean["longitude"] = pd.to_numeric(cand_df_clean["longitude"], errors="coerce")
+    valid_cand = (
+        cand_df_clean["latitude"].notna() &
+        cand_df_clean["longitude"].notna() &
+        cand_df_clean["latitude"].between(-90, 90) &
+        cand_df_clean["longitude"].between(-180, 180) &
+        ((cand_df_clean["latitude"] != 0.0) | (cand_df_clean["longitude"] != 0.0))
+    )
+    cand_df_clean = cand_df_clean[valid_cand].reset_index(drop=True)
+
+    cand_lats = cand_df_clean["latitude"].values
+    cand_lons = cand_df_clean["longitude"].values
+    cand_xyz = np.stack(latlon_to_xyz(cand_lats, cand_lons), axis=1).astype(np.float64)
 
     tree = cKDTree(int_xyz)
     chord_dist = 2.0 * np.sin((distance_threshold_km / 6371.0) / 2.0)
@@ -88,7 +104,7 @@ def deduplicate_gps(
     n_dropped = (~unique_mask).sum()
     print(f"[External Dataset] GPS dedup: dropped {n_dropped} images within {distance_threshold_km*1000:.0f}m of internal points, kept {unique_mask.sum()} unique.")
 
-    return candidate_df[unique_mask].reset_index(drop=True)
+    return cand_df_clean[unique_mask].reset_index(drop=True)
 
 
 def assign_geocells_and_countries(
@@ -252,9 +268,9 @@ def download_and_package_osv5m(
         except Exception as e:
             print(f"[External Dataset] HfFileSystem download failed: {e}")
 
-    # 3. Fallback: stream from Mapillary / OSV WebDataset or CSV manifest
+    # 3. Manifest stream / sample & concurrent image download
     if not collected_rows or len(collected_rows) < 100:
-        print("[External Dataset] Attempting direct manifest download from OSV5M repository...")
+        print("[External Dataset] Sampling from OSV5M repository manifest...")
         try:
             from huggingface_hub import hf_hub_download
             meta_file = hf_hub_download(
@@ -263,20 +279,31 @@ def download_and_package_osv5m(
                 repo_type="dataset",
                 local_dir=str(temp_dir),
             )
-            df_manifest = pd.read_csv(meta_file)
+            df_manifest = pd.read_csv(meta_file, low_memory=False)
             print(f"[External Dataset] Loaded manifest with {len(df_manifest)} entries.")
-            # Priority country sampling from manifest
-            p_mask = df_manifest["country"].isin(PRIORITY_CONFUSION_COUNTRIES)
-            p_df = df_manifest[p_mask].head(num_samples // 2)
-            rem_df = df_manifest[~p_mask].head(num_samples - len(p_df))
-            sampled_df = pd.concat([p_df, rem_df]).sample(frac=1.0).reset_index(drop=True)
+            
+            # Match country column (e.g. 'country' or 'country_code')
+            country_col = "country" if "country" in df_manifest.columns else ("country_code" if "country_code" in df_manifest.columns else df_manifest.columns[3])
+            lat_col = "latitude" if "latitude" in df_manifest.columns else "lat"
+            lon_col = "longitude" if "longitude" in df_manifest.columns else "lon"
+            id_col = "id" if "id" in df_manifest.columns else df_manifest.columns[0]
+
+            # Filter valid countries
+            df_manifest = df_manifest[df_manifest[country_col].isin(valid_isos)].dropna(subset=[lat_col, lon_col])
+            
+            # Priority country quota sampling
+            p_mask = df_manifest[country_col].isin(PRIORITY_CONFUSION_COUNTRIES)
+            p_df = df_manifest[p_mask].sample(n=min(len(df_manifest[p_mask]), num_samples // 2), random_state=42)
+            rem_df = df_manifest[~p_mask].sample(n=min(len(df_manifest[~p_mask]), num_samples - len(p_df)), random_state=42)
+            sampled_df = pd.concat([p_df, rem_df]).sample(frac=1.0, random_state=42).reset_index(drop=True)
 
             for idx, r in sampled_df.iterrows():
                 collected_rows.append({
-                    "image_id": str(r.get("id", f"osv_{idx}")),
-                    "latitude": float(r.get("latitude", r.get("lat", 0.0))),
-                    "longitude": float(r.get("longitude", r.get("lon", 0.0))),
-                    "country_iso": str(r.get("country", "UNK")),
+                    "image_id": str(r[id_col]),
+                    "latitude": float(r[lat_col]),
+                    "longitude": float(r[lon_col]),
+                    "country_iso": str(r[country_col]),
+                    "url": str(r.get("url", r.get("image_url", ""))),
                 })
         except Exception as e:
             print(f"[External Dataset] Manifest download attempt note: {e}")
@@ -291,18 +318,46 @@ def download_and_package_osv5m(
     raw_df = pd.DataFrame(collected_rows)
     print(f"\n[External Dataset] Processed {len(raw_df)} candidate entries.")
 
-    # 1. Deduplicate against 19,002 internal coordinates
+    # 1. Deduplicate against 19,002 internal coordinates (< 50m)
     dedup_df = deduplicate_gps(raw_df)
 
     # 2. Assign Geocells, Country IDs, and Aux Climate Labels
     labeled_df = assign_geocells_and_countries(dedup_df)
 
-    # 3. Save clean CSVs
+    # 3. Concurrent image downloading for sampled images with valid URLs
+    if "url" in labeled_df.columns and labeled_df["url"].str.startswith("http").any():
+        from concurrent.futures import ThreadPoolExecutor
+        print(f"\n[External Dataset] Downloading images for {len(labeled_df)} deduplicated samples (32 workers)...")
+        session = requests.Session()
+
+        def fetch_image(row):
+            img_id = row["image_id"]
+            url = row["url"]
+            dest = images_dir / f"{img_id}.jpg"
+            if dest.exists() and dest.stat().st_size > 1000:
+                return True
+            if not url or not str(url).startswith("http"):
+                # Fallback to Mapillary image CDN
+                url = f"https://images.mapillary.com/{img_id}/thumb-1024.jpg"
+            try:
+                res = session.get(url, timeout=15)
+                if res.status_code == 200:
+                    with open(dest, "wb") as f:
+                        f.write(res.content)
+                    return True
+            except Exception:
+                pass
+            return False
+
+        with ThreadPoolExecutor(max_workers=32) as executor:
+            list(tqdm(executor.map(fetch_image, labeled_df.to_dict("records")), total=len(labeled_df), desc="Fetching images"))
+
+    # 4. Save clean CSVs
     out_csv = output_dir / "osv5m_train.csv"
     labeled_df.to_csv(out_csv, index=False)
     labeled_df.to_csv(output_dir / "metadata.csv", index=False)
 
-    # 4. Generate dataset-metadata.json
+    # 5. Generate dataset-metadata.json
     generate_kaggle_dataset_metadata(output_dir)
 
     print(f"\n" + "=" * 70)
