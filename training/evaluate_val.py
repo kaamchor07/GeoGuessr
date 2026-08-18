@@ -77,6 +77,9 @@ def evaluate_checkpoint(
     all_soft_pred_lats, all_soft_pred_lons = [], []
     all_pred_cells, all_top5_cells = [], []
     all_pred_countries, all_country_confs = [], []
+    all_pred_country_idxs  = []   # top-1 predicted country index (int)
+    all_top2_country_idxs  = []   # top-2 predicted country index (int)
+    all_top3_country_idxs  = []   # top-3 predicted country index (int)
     all_image_ids = []
     all_embeddings = []
     base_radii = []
@@ -107,9 +110,13 @@ def evaluate_checkpoint(
                 batch_soft_lats[i] = s_lat
                 batch_soft_lons[i] = s_lon
 
-            # Country prediction
+            # Country predictions — top-1, top-2, top-3 for masked retrieval
             ct_probs = F.softmax(ct_logits, dim=-1)
-            ct_conf, ct_idx = ct_probs.max(dim=-1)
+            ct_top3 = torch.topk(ct_probs, k=min(3, ct_probs.shape[-1]), dim=-1)
+            ct_top3_idxs  = ct_top3.indices.cpu().numpy()   # [B, 3]
+            ct_top3_confs = ct_top3.values.cpu().numpy()    # [B, 3]
+            ct_conf = ct_top3_confs[:, 0]
+            ct_idx  = ct_top3_idxs[:, 0]
 
             all_image_ids.extend(batch["image_id"])
             all_true_lats.extend(batch["latitude"].numpy())
@@ -125,19 +132,25 @@ def evaluate_checkpoint(
 
             all_pred_cells.extend(pred_gc)
             all_top5_cells.extend(top5_gc)
-            all_pred_countries.extend([idx2country.get(i, "UNK") for i in ct_idx.cpu().numpy()])
-            all_country_confs.extend(ct_conf.cpu().numpy())
+            all_pred_countries.extend([idx2country.get(i, "UNK") for i in ct_idx])
+            all_country_confs.extend(ct_conf)
+            all_pred_country_idxs.extend(ct_top3_idxs[:, 0].tolist())
+            all_top2_country_idxs.extend(ct_top3_idxs[:, 1].tolist() if ct_top3_idxs.shape[1] > 1 else ct_top3_idxs[:, 0].tolist())
+            all_top3_country_idxs.extend(ct_top3_idxs[:, 2].tolist() if ct_top3_idxs.shape[1] > 2 else ct_top3_idxs[:, 0].tolist())
             all_embeddings.append(embeds.cpu().numpy())
 
 
     true_lats = np.array(all_true_lats)
     true_lons = np.array(all_true_lons)
-    all_true_cells = np.array(all_true_cells)
-    all_pred_cells = np.array(all_pred_cells)
-    all_top5_cells = np.array(all_top5_cells)
-    all_country_confs = np.array(all_country_confs)
-    all_embeddings = np.vstack(all_embeddings)
-    base_radii = np.array(base_radii)
+    all_true_cells       = np.array(all_true_cells)
+    all_pred_cells       = np.array(all_pred_cells)
+    all_top5_cells       = np.array(all_top5_cells)
+    all_country_confs    = np.array(all_country_confs)
+    all_pred_country_idxs = np.array(all_pred_country_idxs, dtype=np.int32)
+    all_top2_country_idxs = np.array(all_top2_country_idxs, dtype=np.int32)
+    all_top3_country_idxs = np.array(all_top3_country_idxs, dtype=np.int32)
+    all_embeddings       = np.vstack(all_embeddings)
+    base_radii           = np.array(base_radii)
 
     # Base classification accuracies
     geocell_top1 = float((all_true_cells == all_pred_cells).mean())
@@ -157,8 +170,11 @@ def evaluate_checkpoint(
     # Stage 2: Soft Top-5 Blending
     dists_soft = haversine_km(true_lats, true_lons, np.array(all_soft_pred_lats), np.array(all_soft_pred_lons))
 
-    # Stage 3: FAISS kNN Refinement
-    refined_lats, refined_lons = np.array(all_soft_pred_lats).copy(), np.array(all_soft_pred_lons).copy()
+    # Stage 3: Country-Masked FAISS kNN Refinement
+    # NOTE: We refine from the RAW argmax centroid (not soft blend) so the two
+    # stages are independent and their contributions are clearly measurable.
+    refined_lats = np.array(all_raw_pred_lats).copy()
+    refined_lons = np.array(all_raw_pred_lons).copy()
     if use_knn and (DATA_DIR / "faiss_index.bin").exists():
         try:
             from refinement.knn_refine import KNNRefiner
@@ -167,8 +183,14 @@ def evaluate_checkpoint(
                 query_embeddings=all_embeddings,
                 centroid_lats=refined_lats,
                 centroid_lons=refined_lons,
-                top_k=5,
-                blend_weight=0.35,
+                pred_country_idxs=all_pred_country_idxs,
+                top2_country_idxs=all_top2_country_idxs,
+                top3_country_idxs=all_top3_country_idxs,
+                top_k=10,
+                oversample=60,
+                blend_weight=0.30,
+                min_similarity_threshold=0.65,
+                min_candidates=2,
             )
             dists_knn = haversine_km(true_lats, true_lons, refined_lats, refined_lons)
         except Exception as e:
