@@ -40,37 +40,40 @@ def optimize_radius_parameters(
     """
     print("[Radius Calibrator] Starting grid search against competition proxy...")
 
-    alpha_grid = np.linspace(0.5, 4.0, 36)
+    alpha_grid = np.arange(0.5, 6.1, 0.1)          # 56 values in 0.1 steps
     min_r_grid = [50.0, 100.0, 250.0, 500.0, 750.0, 1000.0, 1250.0, 1500.0, 2000.0, 2500.0]
+    max_r_grid = [500.0, 750.0, 1000.0, 1500.0, 2000.0, 2500.0]
 
     best_score = -float("inf")
     best_params = {}
 
-
-    for alpha in alpha_grid:
-        for min_r in min_r_grid:
-            cand_radii = np.clip(alpha * val_cell_base_radii, min_r, 2500.0)
-            res = compute_competition_score(
-                true_lats=val_true_lats,
-                true_lons=val_true_lons,
-                pred_lats=val_pred_lats,
-                pred_lons=val_pred_lons,
-                pred_radii_km=cand_radii,
-                true_country_isos=val_true_isos,
-                pred_country_isos=val_pred_isos,
-            )
-            score = res["median_score"]
-            if score > best_score:
-                best_score = score
-                best_params = {
-                    "alpha": float(alpha),
-                    "min_radius_km": float(min_r),
-                    "max_radius_km": 2500.0,
-                    "val_median_score": float(res["median_score"]),
-                    "val_mean_score": float(res["mean_score"]),
-                    "val_coverage_rate": float(res["coverage_rate"]),
-                    "val_median_dist_km": float(res["median_haversine_km"]),
-                }
+    for max_r in max_r_grid:
+        for alpha in alpha_grid:
+            for min_r in min_r_grid:
+                if min_r >= max_r:   # skip nonsensical combos
+                    continue
+                cand_radii = np.clip(alpha * val_cell_base_radii, min_r, max_r)
+                res = compute_competition_score(
+                    true_lats=val_true_lats,
+                    true_lons=val_true_lons,
+                    pred_lats=val_pred_lats,
+                    pred_lons=val_pred_lons,
+                    pred_radii_km=cand_radii,
+                    true_country_isos=val_true_isos,
+                    pred_country_isos=val_pred_isos,
+                )
+                score = res["median_score"]
+                if score > best_score:
+                    best_score = score
+                    best_params = {
+                        "alpha": float(alpha),
+                        "min_radius_km": float(min_r),
+                        "max_radius_km": float(max_r),
+                        "val_median_score": float(res["median_score"]),
+                        "val_mean_score": float(res["mean_score"]),
+                        "val_coverage_rate": float(res["coverage_rate"]),
+                        "val_median_dist_km": float(res["median_haversine_km"]),
+                    }
 
     print(f"[Radius Calibrator] Best params found:")
     for k, v in best_params.items():
@@ -156,12 +159,21 @@ def calibrate_on_checkpoint(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", type=str, default=str(ROOT / "checkpoints" / "best.pt"))
+    parser = argparse.ArgumentParser(
+        description="Calibrate radius params against Stage-1 val predictions."
+    )
+    parser.add_argument("--checkpoint",  type=str, default=str(ROOT / "checkpoints" / "best.pt"))
+    parser.add_argument("--batch_size",  type=int, default=64)
+    parser.add_argument("--val_frac",    type=float, default=0.1)
+    parser.add_argument("--output",      type=str, default=str(DATA_DIR / "calibration_params.json"))
     args = parser.parse_args()
 
     if Path(args.checkpoint).exists():
-        calibrate_on_checkpoint(args.checkpoint)
+        calibrate_on_checkpoint(
+            checkpoint_path=args.checkpoint,
+            batch_size=args.batch_size,
+            output_path=args.output,
+        )
     else:
         # Fallback synthetic test
         n = 200

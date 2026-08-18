@@ -1,17 +1,21 @@
 """
 make_submission.py — Step 7, PRD Section 4 items 9-11 & Section 11
 
-End-to-end inference pipeline producing competitive, schema-validated submission CSVs:
-  1. Loads test images with universal watermark masking
-  2. Applies Test-Time Augmentation (TTA: 5-crop / multi-scale, no flips)
-  3. Predicts geocell logits, country logits, and extracted embeddings
-  4. Applies kNN FAISS embedding refinement (if index exists)
-  5. Applies calibrated radius scaling
-  6. Applies country-snap boundary post-processing
-  7. Formats & validates schema against sample_submission.csv
+Stage-1-only inference pipeline (raw argmax geocell centroid).
+Soft blending and kNN refinement are intentionally disabled — both
+degraded haversine median on the held-out val split. Radius is
+calibrated by the grid-searched alpha/min_r params from calibration_params.json,
+NOT a hardcoded confidence-bucket heuristic.
 
 Usage:
-  python inference/make_submission.py --checkpoint checkpoints/best.pt --out_csv submissions/submission_v1.csv --use_tta --use_knn --use_snap
+  python inference/make_submission.py \
+    --checkpoint checkpoints/k1000_original/best.pt \
+    --out_csv submissions/submission_stage1.csv
+
+Flags:
+  --use_tta        Enable 5-crop TTA (default: on, pass --no_tta to disable)
+  --use_snap       Enable country-boundary snapping (default: on)
+  --calib_json     Path to calibration_params.json (default: data/calibration_params.json)
 """
 
 import argparse
@@ -33,10 +37,10 @@ sys.path.insert(0, str(ROOT))
 
 from models.model import GeoLocModel
 from data.dataset import (
-    TestDataset, BACKBONE_SIZE, WATERMARK_X0, WATERMARK_X1, WATERMARK_Y0, WATERMARK_Y1, find_test_images_path
+    TestDataset, BACKBONE_SIZE, find_test_images_path
 )
 
-DATA_DIR = ROOT / "data"
+DATA_DIR      = ROOT / "data"
 SUBMISSIONS_DIR = ROOT / "submissions"
 SUBMISSIONS_DIR.mkdir(exist_ok=True)
 
@@ -44,7 +48,7 @@ SUBMISSIONS_DIR.mkdir(exist_ok=True)
 class TTATestDataset(TestDataset):
     """
     Test dataset returning 5 multi-scale crops for Test-Time Augmentation (TTA).
-    No horizontal flips to preserve driving-side and text cues.
+    No horizontal flips — preserves driving-side and text cues.
     """
 
     def __init__(self, test_dir: Path = None):
@@ -61,8 +65,7 @@ class TTATestDataset(TestDataset):
             img = Image.new("RGB", (640, 640), 0)
         img = self._apply_watermark_mask(img)
 
-        w, h = img.size
-        # 5 crops: Center, Top-Left, Top-Right, Bottom-Left, Bottom-Right (scaled)
+        # 5 crops: Center + 4 corners (scaled to 256 first)
         crops = [
             transforms.functional.center_crop(transforms.functional.resize(img, 256), BACKBONE_SIZE),
             transforms.functional.crop(transforms.functional.resize(img, 256), 0, 0, BACKBONE_SIZE, BACKBONE_SIZE),
@@ -70,13 +73,8 @@ class TTATestDataset(TestDataset):
             transforms.functional.crop(transforms.functional.resize(img, 256), 256 - BACKBONE_SIZE, 0, BACKBONE_SIZE, BACKBONE_SIZE),
             transforms.functional.crop(transforms.functional.resize(img, 256), 256 - BACKBONE_SIZE, 256 - BACKBONE_SIZE, BACKBONE_SIZE, BACKBONE_SIZE),
         ]
-
-        tensors = torch.stack([self.norm(transforms.functional.to_tensor(c)) for c in crops])  # [5, 3, 224, 224]
-
-        return {
-            "images": tensors,
-            "image_id": path.name,
-        }
+        tensors = torch.stack([self.norm(transforms.functional.to_tensor(c)) for c in crops])
+        return {"images": tensors, "image_id": path.name}
 
 
 def generate_submission(
@@ -85,133 +83,99 @@ def generate_submission(
     sample_sub_path: str = str(ROOT / "sample_submission.csv"),
     output_csv_path: str = None,
     use_tta: bool = True,
-    use_knn: bool = True,
     use_snap: bool = True,
+    calib_json: str = str(DATA_DIR / "calibration_params.json"),
     batch_size: int = 16,
     device_str: str = "cuda" if torch.cuda.is_available() else "cpu",
 ):
     device = torch.device(device_str)
+    print(f"[Inference] Pipeline: Stage 1 ONLY (raw argmax centroid) — soft blend & kNN disabled")
     print(f"[Inference] Running on {device}")
 
     if test_dir is None:
         test_dir = find_test_images_path()
     test_dir = Path(test_dir)
-    print(f"[Inference] Using test images from: {test_dir}")
+    print(f"[Inference] Test images: {test_dir}")
 
-
-    # 1. Load Geocell and Country lookups
+    # Load geocell and country lookups
     centroids_df = pd.read_csv(DATA_DIR / "geocell_centroids.csv").sort_values("geocell_id").reset_index(drop=True)
-    encoder_df = pd.read_csv(DATA_DIR / "country_encoder.csv")
-    idx2country = dict(zip(encoder_df["country_idx"], encoder_df["country_iso"]))
+    encoder_df   = pd.read_csv(DATA_DIR / "country_encoder.csv")
+    idx2country  = dict(zip(encoder_df["country_idx"], encoder_df["country_iso"]))
 
-    n_geocells = len(centroids_df)
+    n_geocells  = len(centroids_df)
     n_countries = len(encoder_df)
 
-    # 2. Build Model
+    # Build model
     model = GeoLocModel(
         n_geocells=n_geocells,
         n_countries=n_countries,
         clip_model_name="ViT-B-32",
         clip_pretrained="openai",
     )
-
     if checkpoint_path and Path(checkpoint_path).exists():
-        print(f"[Inference] Loading model checkpoint: {checkpoint_path}")
+        print(f"[Inference] Loading checkpoint: {checkpoint_path}")
         ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
         model.load_state_dict(ckpt.get("model", ckpt))
     else:
-        print("[Inference] WARNING: No checkpoint provided — running inference with base model")
+        print("[Inference] WARNING: No checkpoint — using base model weights")
 
     model = model.to(device)
     model.eval()
 
-    # 3. Load Test Data
+    # Load test data
     if use_tta:
-        print("[Inference] Using TTA (5 crops per image)")
+        print("[Inference] TTA: 5 crops per image")
         ds = TTATestDataset(Path(test_dir))
     else:
+        print("[Inference] TTA: disabled (single center crop)")
         ds = TestDataset(Path(test_dir))
 
     loader = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=0)
 
-    all_image_ids = []
+    all_image_ids    = []
     all_pred_geocells = []
     all_pred_countries = []
-    all_country_confs = []
-    all_embeddings = []
+    all_country_confs  = []
 
-    print("[Inference] Generating model predictions...")
+    print("[Inference] Running forward pass...")
     with torch.no_grad():
         for batch in tqdm(loader):
             if use_tta:
-                # batch['images']: [B, 5, 3, 224, 224]
                 b, n_crops, c, h, w = batch["images"].shape
                 flat_imgs = batch["images"].view(-1, c, h, w).to(device)
                 out = model(flat_imgs)
-                
                 # Average logits across crops
                 gc_logits = out["geocell_logits"].view(b, n_crops, -1).mean(dim=1)
                 ct_logits = out["country_logits"].view(b, n_crops, -1).mean(dim=1)
-                embeds = out["embeddings"].view(b, n_crops, -1).mean(dim=1)
-                embeds = F.normalize(embeds, p=2, dim=-1)
             else:
                 imgs = batch["image"].to(device)
-                out = model(imgs)
+                out  = model(imgs)
                 gc_logits = out["geocell_logits"]
                 ct_logits = out["country_logits"]
-                embeds = F.normalize(out["embeddings"], p=2, dim=-1)
 
-            # Predictions
+            # Stage 1: raw argmax geocell — no blending, no kNN
             pred_gc = gc_logits.argmax(dim=-1).cpu().numpy()
-            pred_ct_probs = F.softmax(ct_logits, dim=-1)
-            pred_ct_conf, pred_ct = pred_ct_probs.max(dim=-1)
+            ct_probs = F.softmax(ct_logits, dim=-1)
+            pred_ct_conf, pred_ct = ct_probs.max(dim=-1)
 
             all_image_ids.extend(batch["image_id"])
             all_pred_geocells.extend(pred_gc)
-            all_pred_countries.extend([idx2country.get(i, "UNK") for i in pred_ct.cpu().numpy()])
+            all_pred_countries.extend([idx2country.get(int(i), "UNK") for i in pred_ct.cpu().numpy()])
             all_country_confs.extend(pred_ct_conf.cpu().numpy())
-            all_embeddings.append(embeds.cpu().numpy())
 
-    all_pred_geocells = np.array(all_pred_geocells)
-    all_country_confs = np.array(all_country_confs)
-    all_embeddings = np.vstack(all_embeddings)
+    all_pred_geocells  = np.array(all_pred_geocells)
+    all_country_confs  = np.array(all_country_confs)
 
-    # Initial coordinates from geocell centroids
-    pred_lats = centroids_df["centroid_lat"].values[all_pred_geocells]
-    pred_lons = centroids_df["centroid_lon"].values[all_pred_geocells]
-    base_radii = centroids_df["max_radius_km"].values[all_pred_geocells]
+    # Stage 1 coordinates: raw argmax centroid lookup
+    pred_lats  = centroids_df["centroid_lat"].values[all_pred_geocells].copy()
+    pred_lons  = centroids_df["centroid_lon"].values[all_pred_geocells].copy()
+    base_radii = centroids_df["max_radius_km"].values[all_pred_geocells].copy()
 
-    # 4. kNN Refinement
-    if use_knn and (DATA_DIR / "faiss_index.bin").exists():
-        print("[Inference] Applying FAISS kNN refinement...")
-        try:
-            from refinement.knn_refine import KNNRefiner
-            refiner = KNNRefiner()
-            pred_lats, pred_lons = refiner.refine(
-                query_embeddings=all_embeddings,
-                centroid_lats=pred_lats,
-                centroid_lons=pred_lons,
-                top_k=5,
-                blend_weight=0.35,
-            )
-        except Exception as e:
-            print(f"[Inference] kNN refinement skipped due to: {e}")
+    print(f"[Inference] Stage 1 complete. {len(pred_lats)} predictions generated.")
 
-    # 5. Confidence-Aware Adaptive Radius Calibration
-    # Rule of thumb from competition scoring:
-    # Tight & wrong is punished hardest with negative penalties.
-    # Therefore, scale radius safely based on model confidence to ensure high coverage.
-    print("[Inference] Computing confidence-aware calibrated radius...")
-    pred_radii = np.where(all_country_confs > 0.75, 750.0,
-                 np.where(all_country_confs > 0.45, 1250.0, 1850.0))
-    # Blend with cell physical spread
-    pred_radii = np.clip(pred_radii + 0.5 * base_radii, 500.0, 2400.0)
-    print(f"[Inference] Calibrated radii range: [{pred_radii.min():.1f} km, {pred_radii.max():.1f} km], Mean: {pred_radii.mean():.1f} km")
-
-
-    # 6. Country Snapping
+    # Optional: country-boundary snapping (keeps coords, doesn't change lat/lon much)
     if use_snap and (ROOT / "country_boundaries.geojson").exists():
-        print("[Inference] Applying Country Boundary snapping post-processing...")
+        print("[Inference] Applying country boundary snapping...")
         try:
             from calibration.country_snap import CountrySnapper
             snapper = CountrySnapper()
@@ -223,53 +187,79 @@ def generate_submission(
                 min_confidence=0.45,
             )
         except Exception as e:
-            print(f"[Inference] Country snapping skipped due to: {e}")
+            print(f"[Inference] Country snapping skipped: {e}")
 
-    # 7. Format Output & Match Schema
+    # Radius: load calibration params from grid search (calibrated on val Stage 1 predictions)
+    calib_path = Path(calib_json)
+    if calib_path.exists():
+        with open(calib_path) as f:
+            calib = json.load(f)
+        alpha = calib["alpha"]
+        min_r = calib["min_radius_km"]
+        max_r = calib.get("max_radius_km", 2500.0)
+        print(f"[Inference] Calibrated radius: alpha={alpha:.2f}, min={min_r:.0f} km, max={max_r:.0f} km")
+        pred_radii = np.clip(alpha * base_radii, min_r, max_r)
+    else:
+        # Fallback: conservative floor of 2000 km if calibration hasn't been run yet
+        print(f"[Inference] WARNING: calibration_params.json not found at {calib_path}")
+        print(f"[Inference] Run: python calibration/calibrate_radius.py --checkpoint <ckpt>")
+        print(f"[Inference] Using fallback: min_radius = 2000 km")
+        pred_radii = np.clip(2.0 * base_radii, 2000.0, 2500.0)
+
+    print(f"[Inference] Radii: min={pred_radii.min():.1f} km | median={np.median(pred_radii):.1f} km | max={pred_radii.max():.1f} km")
+
+    # Build output DataFrame
     pred_df = pd.DataFrame({
-        "image_id": all_image_ids,
-        "pred_lat": np.round(pred_lats, 6),
-        "pred_lon": np.round(pred_lons, 6),
+        "image_id":       all_image_ids,
+        "pred_lat":       np.round(pred_lats, 6),
+        "pred_lon":       np.round(pred_lons, 6),
         "pred_radius_km": np.round(pred_radii, 2),
     })
 
-    # Ensure ordering and IDs match sample_submission.csv
-    if Path(sample_sub_path).exists():
+    # Align to sample_submission.csv row order (fills missing with 0/1000 defaults)
+    sample_sub_path = Path(sample_sub_path)
+    if sample_sub_path.exists():
         sample_sub = pd.read_csv(sample_sub_path)
         pred_df = sample_sub[["image_id"]].merge(pred_df, on="image_id", how="left")
-        # Fill any missing with defaults
-        pred_df["pred_lat"] = pred_df["pred_lat"].fillna(0.0)
-        pred_df["pred_lon"] = pred_df["pred_lon"].fillna(0.0)
-        pred_df["pred_radius_km"] = pred_df["pred_radius_km"].fillna(1000.0)
+        pred_df["pred_lat"]       = pred_df["pred_lat"].fillna(0.0)
+        pred_df["pred_lon"]       = pred_df["pred_lon"].fillna(0.0)
+        pred_df["pred_radius_km"] = pred_df["pred_radius_km"].fillna(2000.0)
+        missing = sample_sub[~sample_sub["image_id"].isin(all_image_ids)]
+        if len(missing):
+            print(f"[Inference] WARNING: {len(missing)} test images had no prediction — filled with defaults")
+    else:
+        print(f"[Inference] WARNING: sample_submission.csv not found at {sample_sub_path} — using raw row order")
 
+    # Write CSV
     if output_csv_path is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_csv_path = str(SUBMISSIONS_DIR / f"submission_{timestamp}.csv")
+        output_csv_path = str(SUBMISSIONS_DIR / f"submission_stage1_{timestamp}.csv")
 
     pred_df.to_csv(output_csv_path, index=False)
-    print(f"\n[Inference] Saved final submission -> {output_csv_path}")
-    print(f"[Inference] Total rows: {len(pred_df)}")
-    print(pred_df.head(10).to_string(index=False))
 
-    # Schema assertions
-    assert list(pred_df.columns) == ["image_id", "pred_lat", "pred_lon", "pred_radius_km"]
-    assert pred_df["pred_lat"].between(-90, 90).all()
-    assert pred_df["pred_lon"].between(-180, 180).all()
-    assert (pred_df["pred_radius_km"] > 0).all()
-    print("\n[Inference] SUCCESS: Submission CSV passed all schema and range validations!")
+    # Schema validation
+    print(f"\n[Inference] Saved -> {output_csv_path}  ({len(pred_df)} rows)")
+    assert list(pred_df.columns) == ["image_id", "pred_lat", "pred_lon", "pred_radius_km"], \
+        f"Schema mismatch: columns are {list(pred_df.columns)}"
+    assert pred_df["pred_lat"].between(-90, 90).all(),  "pred_lat out of range [-90, 90]"
+    assert pred_df["pred_lon"].between(-180, 180).all(), "pred_lon out of range [-180, 180]"
+    assert (pred_df["pred_radius_km"] > 0).all(),        "pred_radius_km must be > 0"
+    print("[Inference] Schema validation PASSED: columns, lat/lon ranges, radius > 0")
+    print()
+    print(pred_df.head(10).to_string(index=False))
 
     return output_csv_path
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", type=str, default=None)
-    parser.add_argument("--test_dir", type=str, default=None)
-    parser.add_argument("--out_csv", type=str, default=None)
-    parser.add_argument("--no_tta", action="store_true")
-    parser.add_argument("--no_knn", action="store_true")
-    parser.add_argument("--no_snap", action="store_true")
-    parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--checkpoint",  type=str, default=None)
+    parser.add_argument("--test_dir",    type=str, default=None)
+    parser.add_argument("--out_csv",     type=str, default=None)
+    parser.add_argument("--no_tta",      action="store_true")
+    parser.add_argument("--no_snap",     action="store_true")
+    parser.add_argument("--calib_json",  type=str, default=str(DATA_DIR / "calibration_params.json"))
+    parser.add_argument("--batch_size",  type=int, default=16)
     args = parser.parse_args()
 
     generate_submission(
@@ -277,7 +267,7 @@ if __name__ == "__main__":
         test_dir=args.test_dir,
         output_csv_path=args.out_csv,
         use_tta=not args.no_tta,
-        use_knn=not args.no_knn,
         use_snap=not args.no_snap,
+        calib_json=args.calib_json,
         batch_size=args.batch_size,
     )
