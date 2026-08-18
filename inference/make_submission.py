@@ -189,22 +189,26 @@ def generate_submission(
         except Exception as e:
             print(f"[Inference] Country snapping skipped: {e}")
 
-    # Radius: load calibration params from grid search (calibrated on val Stage 1 predictions)
+    # Radius: load calibration params and apply per-image confidence-driven curve
+    # Formula: r(conf) = A + B * sqrt(1 - conf)
     calib_path = Path(calib_json)
     if calib_path.exists():
         with open(calib_path) as f:
             calib = json.load(f)
-        alpha = calib["alpha"]
-        min_r = calib["min_radius_km"]
-        max_r = calib.get("max_radius_km", 2500.0)
-        print(f"[Inference] Calibrated radius: alpha={alpha:.2f}, min={min_r:.0f} km, max={max_r:.0f} km")
-        pred_radii = np.clip(alpha * base_radii, min_r, max_r)
+        A = calib.get("A", calib.get("min_radius_km", 1500.0))
+        B = calib.get("B", 0.0)
+        formula = calib.get("formula", "A + B * sqrt(1 - conf)")
+        print(f"[Inference] Radius formula: {formula}")
+        print(f"[Inference] A={A:.0f} km, B={B:.0f} km")
+        print(f"[Inference] r(conf=1.0)={A:.0f} km | r(conf=0.5)={A + B*(0.5**0.5):.0f} km | r(conf=0.0)={A+B:.0f} km")
+        sqrt_uncertainty = np.sqrt(np.clip(1.0 - all_country_confs, 0.0, 1.0))
+        pred_radii = np.clip(A + B * sqrt_uncertainty, 50.0, 3000.0)
     else:
-        # Fallback: conservative floor of 2000 km if calibration hasn't been run yet
         print(f"[Inference] WARNING: calibration_params.json not found at {calib_path}")
         print(f"[Inference] Run: python calibration/calibrate_radius.py --checkpoint <ckpt>")
-        print(f"[Inference] Using fallback: min_radius = 2000 km")
-        pred_radii = np.clip(2.0 * base_radii, 2000.0, 2500.0)
+        print(f"[Inference] Using fallback: r = 1500 + 700*sqrt(1-conf)")
+        sqrt_uncertainty = np.sqrt(np.clip(1.0 - all_country_confs, 0.0, 1.0))
+        pred_radii = np.clip(1500.0 + 700.0 * sqrt_uncertainty, 50.0, 3000.0)
 
     print(f"[Inference] Radii: min={pred_radii.min():.1f} km | median={np.median(pred_radii):.1f} km | max={pred_radii.max():.1f} km")
 

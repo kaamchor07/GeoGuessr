@@ -220,27 +220,30 @@ def evaluate_checkpoint(
         dists_final = dists_knn
 
     # -------------------------------------------------------------------------
-    # Radius Calibration: run grid search on THIS set of predictions to find
-    # the optimal radius curve, instead of relying on a stale hardcoded 3-bucket
+    # Radius Calibration: grid-search A and B for r = A + B*sqrt(1-conf)
+    # Run on Stage-1 predictions (raw centroid) to measure calibration cleanly
     # -------------------------------------------------------------------------
     from calibration.calibrate_radius import optimize_radius_parameters
 
-    print("\n[Eval] Running radius grid search on Stage 4 predictions...")
+    print("\n[Eval] Running radius grid search (confidence-driven curve) on Stage 1 predictions...")
     calib_params = optimize_radius_parameters(
         val_true_lats=true_lats,
         val_true_lons=true_lons,
-        val_pred_lats=snapped_lats,
-        val_pred_lons=snapped_lons,
-        val_cell_base_radii=base_radii,
+        val_pred_lats=np.array(all_raw_pred_lats),
+        val_pred_lons=np.array(all_raw_pred_lons),
+        val_country_confs=all_country_confs,
         val_true_isos=all_true_countries,
         val_pred_isos=all_pred_countries,
     )
-    alpha     = calib_params["alpha"]
-    min_r     = calib_params["min_radius_km"]
-    max_r     = calib_params.get("max_radius_km", 2500.0)
-    pred_radii = np.clip(alpha * base_radii, min_r, max_r)
+    A = calib_params["A"]
+    B = calib_params["B"]
+    sqrt_unc = np.sqrt(np.clip(1.0 - all_country_confs, 0.0, 1.0))
+    pred_radii = np.clip(A + B * sqrt_unc, 50.0, 3000.0)
 
-    # Also compute per-stage scores so we can see the refinement impact on the proxy
+    print(f"  r(conf=1.0) = {A:.0f} km | r(conf=0.5) = {A + B*(0.5**0.5):.0f} km | r(conf=0.0) = {A+B:.0f} km")
+    print(f"  pred_radii: p25={np.percentile(pred_radii,25):.0f} median={np.median(pred_radii):.0f} p75={np.percentile(pred_radii,75):.0f} km")
+
+    # Per-stage proxy scores under the calibrated radius
     def stage_score(pred_lats_s, pred_lons_s, radii):
         return compute_competition_score(
             true_lats=true_lats, true_lons=true_lons,
@@ -284,8 +287,9 @@ def evaluate_checkpoint(
     print(f"  Stage 4 (Final + Country Snapped): Median = {np.median(dists_final):.1f} km | Mean = {np.mean(dists_final):.1f} km | <750km = {(dists_final < 750).mean()*100:.1f}%")
 
     print()
-    print(f"  Calibrated Radius: alpha={alpha:.2f} * base_radius, floor={min_r:.0f} km, max={max_r:.0f} km")
-    print(f"  Calibrated pred_radii: p25={np.percentile(pred_radii,25):.0f} median={np.median(pred_radii):.0f} p75={np.percentile(pred_radii,75):.0f} km")
+    print(f"  Calibrated Radius (r = A + B·√(1−conf)): A={A:.0f} km, B={B:.0f} km")
+    print(f"  r(conf=1.0)={A:.0f} km | r(conf=0.5)={A + B*(0.5**0.5):.0f} km | r(conf=0.0)={A+B:.0f} km")
+    print(f"  pred_radii: p25={np.percentile(pred_radii,25):.0f} median={np.median(pred_radii):.0f} p75={np.percentile(pred_radii,75):.0f} km")
     print()
     print(f"  {'Stage':<36}  {'MedianScore':>12}  {'Coverage':>10}  {'MeanScore':>10}")
     print(f"  {'-'*36}  {'-'*12}  {'-'*10}  {'-'*10}")

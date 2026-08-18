@@ -72,13 +72,15 @@ def find_dataset_paths():
 
 
 def find_test_images_path():
-    """Locates test images directory across local and Kaggle environments by matching test image IDs."""
-    # 1. Local workspace default
-    local_test = ROOT / "test_images_sampled"
-    if local_test.exists() and len(list(local_test.glob("*.jpg"))) > 0:
-        return local_test
+    """Locates test images directory across local and Kaggle environments.
 
-    # Sample ID to search for
+    Priority:
+      1. /kaggle/input/<competition-slug>/test_images  (real competition test set)
+      2. /kaggle/input/**/*test*  (any attached dataset with 'test' in path)
+      3. /kaggle/working/**/*test* (working dir copy)
+      4. Local workspace test_images_sampled/ (dry-run fallback — LAST RESORT)
+    """
+    # Resolve sample_id from sample_submission.csv for rglob matching
     sample_sub = ROOT / "sample_submission.csv"
     sample_id = "34f65e00cc3df67d.jpg"
     if sample_sub.exists():
@@ -89,23 +91,48 @@ def find_test_images_path():
         except Exception:
             pass
 
-    search_roots = [Path("/kaggle/input"), Path("/kaggle/working"), ROOT]
-    for s_root in search_roots:
-        if s_root.exists():
-            # 1. Search for the sample test file directly
-            found_files = list(s_root.rglob(sample_id))
-            if found_files:
-                parent_dir = found_files[0].parent
-                print(f"[find_test_images_path] Found test directory via '{sample_id}': {parent_dir}")
-                return parent_dir
+    # 1. Known competition dataset path patterns (highest priority)
+    known_patterns = [
+        Path("/kaggle/input/geolocation-hackathon/test_images"),
+        Path("/kaggle/input/geolocation-hackathon/test"),
+        Path("/kaggle/input/datasets/harshsolanki07/geolocation-data/test_images"),
+        Path("/kaggle/input/datasets/harshsolanki07/geolocation-data/test"),
+    ]
+    for p in known_patterns:
+        if p.exists() and len(list(p.glob("*.jpg"))) > 0:
+            print(f"[find_test_images_path] Found real test set at: {p} ({len(list(p.glob('*.jpg')))} images)")
+            return p
 
-            # 2. Search for any directory with 'test' in name containing images
-            for cand in s_root.rglob("*test*"):
-                if cand.is_dir() and len(list(cand.glob("*.jpg"))) > 0:
-                    print(f"[find_test_images_path] Found test directory via wildcard: {cand}")
-                    return cand
+    # 2. Search /kaggle/input for the sample image ID (catches any dataset layout)
+    kaggle_input = Path("/kaggle/input")
+    if kaggle_input.exists():
+        found = list(kaggle_input.rglob(sample_id))
+        if found:
+            p = found[0].parent
+            print(f"[find_test_images_path] Found real test set via sample_id '{sample_id}': {p}")
+            return p
+        # Wildcard: any dir with 'test' in name containing .jpg files
+        for cand in sorted(kaggle_input.rglob("*test*")):
+            if cand.is_dir() and len(list(cand.glob("*.jpg"))) > 0:
+                print(f"[find_test_images_path] Found test dir via wildcard in /kaggle/input: {cand}")
+                return cand
 
-    print(f"[find_test_images_path] WARNING: Test images directory not found, falling back to {local_test}")
+    # 3. /kaggle/working fallback
+    kaggle_working = Path("/kaggle/working")
+    if kaggle_working.exists():
+        found = list(kaggle_working.rglob(sample_id))
+        if found:
+            p = found[0].parent
+            print(f"[find_test_images_path] Found test set in /kaggle/working: {p}")
+            return p
+
+    # 4. LOCAL FALLBACK — dry-run sampled set (NOT the real competition test set)
+    local_test = ROOT / "test_images_sampled"
+    print(
+        f"[find_test_images_path] WARNING: Real competition test images NOT found. "
+        f"Falling back to local dry-run sample: {local_test}. "
+        f"Attach the competition dataset on Kaggle to get real test predictions."
+    )
     return local_test
 
 
