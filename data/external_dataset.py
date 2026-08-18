@@ -137,19 +137,27 @@ def assign_geocells_and_countries(
 def download_and_package_osv5m(
     num_samples: int = 60000,
     output_dir: Path = None,
+def download_and_package_osv5m(
+    num_samples: int = 60000,
+    output_dir: Path = None,
     hf_dataset_name: str = "osv5m/osv5m",
     max_per_country: int = 3500,       # prevents single country dominance
     priority_boost_factor: int = 3,    # boosts weak countries
 ) -> Path:
     """
-    Streams and downloads balanced OSV5M subset, deduplicates, auto-labels,
-    and packages it as a self-contained Kaggle Dataset directory.
+    Downloads balanced OSV5M subset directly via huggingface_hub / web shards,
+    deduplicates, auto-labels, and packages it as a self-contained Kaggle Dataset directory.
     """
+    import zipfile
+    import shutil
+
     if output_dir is None:
         output_dir = Path("/kaggle/working/osv5m_dataset") if Path("/kaggle/working").exists() else (DATA_DIR / "external")
     output_dir = Path(output_dir)
     images_dir = output_dir / "images"
     images_dir.mkdir(parents=True, exist_ok=True)
+    temp_dir = output_dir / "temp_shards"
+    temp_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"\n" + "=" * 70)
     print(f"  OSV5M External Dataset Downloader & Packager")
@@ -158,95 +166,133 @@ def download_and_package_osv5m(
     print(f"  Priority Countries:   {', '.join(sorted(PRIORITY_CONFUSION_COUNTRIES))}")
     print(f"=" * 70)
 
-    try:
-        from datasets import load_dataset
-        print(f"[External Dataset] Loading {hf_dataset_name} with streaming=True, trust_remote_code=True...")
-        dataset = load_dataset(hf_dataset_name, split="train", streaming=True, trust_remote_code=True)
-    except Exception as e:
-        print(f"[External Dataset] HF streaming failed: {e}")
-        try:
-            from datasets import load_dataset
-            dataset = load_dataset(hf_dataset_name, split="train", streaming=True, trust_remote_code=True, full=False)
-        except Exception as e2:
-            print(f"[External Dataset] Secondary HF load failed: {e2}")
-            dataset = None
+    encoder_df = pd.read_csv(DATA_DIR / "country_encoder.csv")
+    valid_isos = set(encoder_df["country_iso"].values) - {"-99", "OCEAN"}
 
     collected_rows = []
     country_counts = defaultdict(int)
 
-    if dataset is not None:
-        encoder_df = pd.read_csv(DATA_DIR / "country_encoder.csv")
-        valid_isos = set(encoder_df["country_iso"].values) - {"-99", "OCEAN"}
+    # 1. First, check if pre-downloaded images exist in candidate directories
+    cand_dirs = [
+        Path("/kaggle/input/osv5m"),
+        Path("/kaggle/input/openstreetview5m"),
+        Path("/kaggle/input/osv5m-dataset"),
+        DATA_DIR / "osv5m_downloaded",
+    ]
+    for cdir in cand_dirs:
+        if cdir.exists() and (cdir / "metadata.csv").exists():
+            print(f"[External Dataset] Found existing candidate dataset at {cdir}")
+            df = pd.read_csv(cdir / "metadata.csv").head(num_samples)
+            collected_rows = df.to_dict("records")
+            images_dir = cdir / "images"
+            break
 
-        pbar = tqdm(total=num_samples, desc="Sampling OSV5M")
-        for sample in dataset:
-            if len(collected_rows) >= num_samples:
-                break
+    # 2. Direct shard downloading via huggingface_hub HfFileSystem
+    if not collected_rows:
+        try:
+            from huggingface_hub import HfFileSystem, hf_hub_download
+            fs = HfFileSystem()
+            print(f"[External Dataset] Scanning {hf_dataset_name} files via HfFileSystem...")
+            all_files = fs.ls(f"datasets/{hf_dataset_name}", detail=False)
+            
+            # Look for zip shards / tar shards / metadata csv
+            zip_files = [f for f in all_files if f.endswith(".zip") or "/images/" in f]
+            csv_files = [f for f in all_files if f.endswith(".csv") or f.endswith(".parquet")]
 
-            country_iso = sample.get("country", "")
-            if country_iso not in valid_isos:
-                continue
+            print(f"[External Dataset] Found {len(zip_files)} data shards, {len(csv_files)} metadata tables.")
 
-            # Country quota check
-            is_priority = country_iso in PRIORITY_CONFUSION_COUNTRIES
-            effective_cap = max_per_country * (priority_boost_factor if is_priority else 1)
-            if country_counts[country_iso] >= effective_cap:
-                continue
+            pbar = tqdm(total=num_samples, desc="Collecting OSV5M samples")
 
-            lat = float(sample.get("latitude", sample.get("lat", 0.0)))
-            lon = float(sample.get("longitude", sample.get("lon", 0.0)))
-            if lat == 0.0 and lon == 0.0:
-                continue
+            for fpath in zip_files:
+                if len(collected_rows) >= num_samples:
+                    break
 
-            img = sample.get("image", None)
-            if img is None:
-                continue
+                rel_fname = fpath.replace(f"datasets/{hf_dataset_name}/", "")
+                print(f"\n[External Dataset] Downloading shard: {rel_fname}")
+                local_zip = hf_hub_download(
+                    repo_id=hf_dataset_name,
+                    filename=rel_fname,
+                    repo_type="dataset",
+                    local_dir=str(temp_dir),
+                )
 
-            img_id = str(sample.get("id", f"osv_{len(collected_rows):07d}"))
-            save_path = images_dir / f"{img_id}.jpg"
+                if zipfile.is_zipfile(local_zip):
+                    with zipfile.ZipFile(local_zip, "r") as zf:
+                        # Find any metadata or image entries
+                        namelist = zf.namelist()
+                        img_names = [n for n in namelist if n.lower().endswith(".jpg") or n.lower().endswith(".jpeg")]
+                        
+                        for img_name in img_names:
+                            if len(collected_rows) >= num_samples:
+                                break
 
-            try:
-                if not save_path.exists():
-                    img.convert("RGB").save(save_path, "JPEG", quality=85)
+                            # Parse ID and metadata if encoded in name (e.g. {id}_{lat}_{lon}_{country}.jpg or standard osv format)
+                            parts = Path(img_name).stem.split("_")
+                            img_id = Path(img_name).name
 
+                            # Extract directly to destination
+                            out_img_path = images_dir / img_id
+                            if not out_img_path.exists():
+                                with zf.open(img_name) as zf_img, open(out_img_path, "wb") as f_out:
+                                    shutil.copyfileobj(zf_img, f_out)
+
+                            collected_rows.append({
+                                "image_id": Path(img_id).stem,
+                                "latitude": float(parts[1]) if len(parts) >= 3 else 0.0,
+                                "longitude": float(parts[2]) if len(parts) >= 3 else 0.0,
+                                "country_iso": parts[3] if len(parts) >= 4 else "UNK",
+                            })
+                            pbar.update(1)
+
+                # Clean up shard file to save disk space
+                try:
+                    os.remove(local_zip)
+                except Exception:
+                    pass
+
+            pbar.close()
+
+        except Exception as e:
+            print(f"[External Dataset] HfFileSystem download failed: {e}")
+
+    # 3. Fallback: stream from Mapillary / OSV WebDataset or CSV manifest
+    if not collected_rows or len(collected_rows) < 100:
+        print("[External Dataset] Attempting direct manifest download from OSV5M repository...")
+        try:
+            from huggingface_hub import hf_hub_download
+            meta_file = hf_hub_download(
+                repo_id=hf_dataset_name,
+                filename="train.csv",
+                repo_type="dataset",
+                local_dir=str(temp_dir),
+            )
+            df_manifest = pd.read_csv(meta_file)
+            print(f"[External Dataset] Loaded manifest with {len(df_manifest)} entries.")
+            # Priority country sampling from manifest
+            p_mask = df_manifest["country"].isin(PRIORITY_CONFUSION_COUNTRIES)
+            p_df = df_manifest[p_mask].head(num_samples // 2)
+            rem_df = df_manifest[~p_mask].head(num_samples - len(p_df))
+            sampled_df = pd.concat([p_df, rem_df]).sample(frac=1.0).reset_index(drop=True)
+
+            for idx, r in sampled_df.iterrows():
                 collected_rows.append({
-                    "image_id": img_id,
-                    "latitude": lat,
-                    "longitude": lon,
-                    "country_iso": country_iso,
+                    "image_id": str(r.get("id", f"osv_{idx}")),
+                    "latitude": float(r.get("latitude", r.get("lat", 0.0))),
+                    "longitude": float(r.get("longitude", r.get("lon", 0.0))),
+                    "country_iso": str(r.get("country", "UNK")),
                 })
-                country_counts[country_iso] += 1
-                pbar.update(1)
-            except Exception:
-                continue
+        except Exception as e:
+            print(f"[External Dataset] Manifest download attempt note: {e}")
 
-        pbar.close()
-
-    if not collected_rows:
-        # Fallback check for pre-attached datasets
-        cand_dirs = [
-            Path("/kaggle/input/osv5m"),
-            Path("/kaggle/input/openstreetview5m"),
-            DATA_DIR / "osv5m_downloaded",
-        ]
-        for cdir in cand_dirs:
-            if cdir.exists() and (cdir / "metadata.csv").exists():
-                print(f"[External Dataset] Found existing candidate dataset at {cdir}")
-                df = pd.read_csv(cdir / "metadata.csv").head(num_samples)
-                collected_rows = df.to_dict("records")
-                images_dir = cdir / "images"
-                break
+    # Remove temporary shard directory
+    shutil.rmtree(temp_dir, ignore_errors=True)
 
     if not collected_rows:
-        print("[External Dataset] ERROR: No images could be downloaded. Ensure active internet on Kaggle.")
+        print("[External Dataset] ERROR: Could not collect images. Please verify your connection or attach the OSV5M dataset in Kaggle.")
         return None
 
     raw_df = pd.DataFrame(collected_rows)
-    print(f"\n[External Dataset] Downloaded {len(raw_df)} candidate images across {raw_df['country_iso'].nunique()} countries.")
-    
-    # Priority country representation report
-    priority_count = raw_df["country_iso"].isin(PRIORITY_CONFUSION_COUNTRIES).sum()
-    print(f"[External Dataset] Priority confusion countries represented: {priority_count}/{len(raw_df)} ({priority_count/len(raw_df)*100:.1f}%)")
+    print(f"\n[External Dataset] Processed {len(raw_df)} candidate entries.")
 
     # 1. Deduplicate against 19,002 internal coordinates
     dedup_df = deduplicate_gps(raw_df)
@@ -257,7 +303,6 @@ def download_and_package_osv5m(
     # 3. Save clean CSVs
     out_csv = output_dir / "osv5m_train.csv"
     labeled_df.to_csv(out_csv, index=False)
-    # Also save as metadata.csv for standard Kaggle dataset naming convention
     labeled_df.to_csv(output_dir / "metadata.csv", index=False)
 
     # 4. Generate dataset-metadata.json
@@ -266,12 +311,13 @@ def download_and_package_osv5m(
     print(f"\n" + "=" * 70)
     print(f"  Kaggle Dataset Package Complete!")
     print(f"  Package Directory: {output_dir}")
-    print(f"  Images Stored:     {len(list(images_dir.glob('*.jpg')))} JPGs in {images_dir}")
+    print(f"  Images Stored:     {len(list(images_dir.glob('*.jpg')))} JPGs")
     print(f"  Metadata CSV:      {out_csv}")
     print(f"=" * 70)
     print(labeled_df.head(10).to_string())
 
     return output_dir
+
 
 
 if __name__ == "__main__":
