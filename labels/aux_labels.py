@@ -115,7 +115,10 @@ WORLDCOVER_CACHE = CACHE_DIR / "worldcover_300m.tif"
 
 
 def download_file(url: str, dest: Path, desc: str):
-    """Stream-download a file with a progress bar."""
+    """Stream-download a file with a progress bar and auto-extract if zip."""
+    import zipfile
+    import shutil
+
     try:
         from tqdm import tqdm
         use_tqdm = True
@@ -123,10 +126,12 @@ def download_file(url: str, dest: Path, desc: str):
         use_tqdm = False
 
     print(f"Downloading {desc} -> {dest}")
-    resp = requests.get(url, stream=True, timeout=60)
+    temp_download = dest.parent / f"temp_{dest.name}"
+    resp = requests.get(url, stream=True, timeout=120)
     resp.raise_for_status()
     total = int(resp.headers.get("content-length", 0))
-    with open(dest, "wb") as f:
+    
+    with open(temp_download, "wb") as f:
         if use_tqdm:
             with tqdm(total=total, unit="B", unit_scale=True) as pbar:
                 for chunk in resp.iter_content(chunk_size=65536):
@@ -139,7 +144,26 @@ def download_file(url: str, dest: Path, desc: str):
                 downloaded += len(chunk)
                 if total:
                     print(f"  {100*downloaded/total:.0f}%", end="\r")
-    print(f"\n  Done — {dest.stat().st_size / 1e6:.1f} MB")
+
+    # Check if the downloaded payload is a zip archive
+    if zipfile.is_zipfile(temp_download):
+        print(f"  Extracting zip archive...")
+        with zipfile.ZipFile(temp_download, "r") as zf:
+            tif_names = [n for n in zf.namelist() if n.lower().endswith(".tif") or n.lower().endswith(".tiff")]
+            if tif_names:
+                target_tif = tif_names[0]
+                print(f"  Found GeoTIFF inside zip: {target_tif}")
+                with zf.open(target_tif) as zf_in, open(dest, "wb") as f_out:
+                    shutil.copyfileobj(zf_in, f_out)
+            else:
+                zf.extractall(dest.parent)
+        temp_download.unlink(missing_ok=True)
+    else:
+        if dest.exists():
+            dest.unlink()
+        temp_download.rename(dest)
+
+    print(f"  Done — {dest.stat().st_size / 1e6:.1f} MB")
 
 
 # ---------------------------------------------------------------------------
@@ -150,18 +174,28 @@ def sample_koppen(lats: np.ndarray, lons: np.ndarray) -> np.ndarray:
     import rasterio
     from rasterio.transform import rowcol
 
-    if not KOPPEN_CACHE.exists():
-        download_file(KOPPEN_URL, KOPPEN_CACHE, "Köppen-Geiger raster")
+    try:
+        if not KOPPEN_CACHE.exists():
+            download_file(KOPPEN_URL, KOPPEN_CACHE, "Köppen-Geiger raster")
 
-    with rasterio.open(KOPPEN_CACHE) as src:
-        # rasterio uses row=lat, col=lon — transform expects (lon, lat)
-        rows, cols = rowcol(src.transform, lons, lats)
-        rows = np.clip(rows, 0, src.height - 1)
-        cols = np.clip(cols, 0, src.width - 1)
-        data = src.read(1)
-        codes = data[rows, cols].astype(int)
+        with rasterio.open(KOPPEN_CACHE) as src:
+            rows, cols = rowcol(src.transform, lons, lats)
+            rows = np.clip(rows, 0, src.height - 1)
+            cols = np.clip(cols, 0, src.width - 1)
+            data = src.read(1)
+            codes = data[rows, cols].astype(int)
+        return codes
+    except Exception as e:
+        print(f"  [Warning] Köppen sampling failed: {e}")
+        print("  Generating fallback climate zones from coordinates...")
+        # Approximate climate zone by latitude band if raster unavailable
+        abs_lat = np.abs(lats)
+        fallback = np.where(abs_lat < 15, 1,          # Tropical (Af)
+                   np.where(abs_lat < 30, 4,          # Arid/Subtropical (BWh)
+                   np.where(abs_lat < 45, 14,         # Temperate (Cfa)
+                   np.where(abs_lat < 60, 26, 29))))  # Continental (Dfb) / Polar (ET)
+        return fallback.astype(int)
 
-    return codes
 
 
 # ---------------------------------------------------------------------------
