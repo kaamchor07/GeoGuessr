@@ -91,6 +91,68 @@ def point_in_country(lon, lat, features, rtree_idx):
     return "OCEAN", "Ocean"
 
 
+def label_countries_from_geojson(
+    coords_csv: Path = None,
+    geojson_path: Path = None,
+    out_csv: Path = None,
+    batch_size: int = 500,
+):
+    if coords_csv is None:
+        coords_csv = COORDS_CSV
+    if geojson_path is None:
+        geojson_path = GEOJSON_PATH
+    if out_csv is None:
+        out_csv = DATA_DIR / "country_labels.csv"
+
+    print(f"Loading coordinates from {coords_csv}")
+    df = pd.read_csv(coords_csv)
+    print(f"  {len(df)} images to label")
+
+    features = load_geojson(Path(geojson_path))
+    rtree_idx = build_spatial_index(features)
+
+    # Label each point
+    print("Running point-in-polygon tests …")
+    isos, names = [], []
+    for i, row in enumerate(df.itertuples(index=False)):
+        iso, name = point_in_country(row.longitude, row.latitude, features, rtree_idx)
+        isos.append(iso)
+        names.append(name)
+        if (i + 1) % batch_size == 0 or (i + 1) == len(df):
+            print(f"  {i+1}/{len(df)} done", end="\r")
+
+    print()
+
+    # Build output
+    out_df = pd.DataFrame(
+        {
+            "image_id": df["image_id"].values,
+            "latitude": df["latitude"].values,
+            "longitude": df["longitude"].values,
+            "country_iso": isos,
+            "country_name": names,
+        }
+    )
+
+    out_df.to_csv(out_csv, index=False)
+    print(f"\nSaved -> {out_csv}")
+
+    # Summary
+    country_counts = out_df["country_iso"].value_counts()
+    print(f"\n=== Country distribution ({len(country_counts)} unique) ===")
+    print(country_counts.head(20).to_string())
+    ocean = (out_df["country_iso"] == "OCEAN").sum()
+    print(f"\nOcean/unmatched: {ocean} ({100*ocean/len(df):.1f}%)")
+
+    # Save encoder mapping (iso -> integer index) for model training
+    iso_list = sorted(out_df["country_iso"].unique())
+    encoder = pd.DataFrame({"country_iso": iso_list, "country_idx": range(len(iso_list))})
+    enc_path = DATA_DIR / "country_encoder.csv"
+    encoder.to_csv(enc_path, index=False)
+    print(f"Country encoder saved -> {enc_path}  ({len(iso_list)} classes)")
+    return out_df, encoder
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate country labels for training images")
     parser.add_argument("--coords_csv", type=str, default=str(COORDS_CSV))
@@ -108,54 +170,14 @@ def main():
     )
     args = parser.parse_args()
 
-    # Load data
-    print(f"Loading coordinates from {args.coords_csv}")
-    df = pd.read_csv(args.coords_csv)
-    print(f"  {len(df)} images to label")
-
-    features = load_geojson(Path(args.geojson))
-    rtree_idx = build_spatial_index(features)
-
-    # Label each point
-    print("Running point-in-polygon tests …")
-    isos, names = [], []
-    for i, row in enumerate(df.itertuples(index=False)):
-        iso, name = point_in_country(row.longitude, row.latitude, features, rtree_idx)
-        isos.append(iso)
-        names.append(name)
-        if (i + 1) % args.batch_size == 0 or (i + 1) == len(df):
-            print(f"  {i+1}/{len(df)} done", end="\r")
-
-    print()
-
-    # Build output
-    out_df = pd.DataFrame(
-        {
-            "image_id": df["image_id"].values,
-            "latitude": df["latitude"].values,
-            "longitude": df["longitude"].values,
-            "country_iso": isos,
-            "country_name": names,
-        }
+    label_countries_from_geojson(
+        coords_csv=args.coords_csv,
+        geojson_path=args.geojson,
+        out_csv=args.out,
+        batch_size=args.batch_size,
     )
-
-    out_df.to_csv(args.out, index=False)
-    print(f"\nSaved -> {args.out}")
-
-    # Summary
-    country_counts = out_df["country_iso"].value_counts()
-    print(f"\n=== Country distribution ({len(country_counts)} unique) ===")
-    print(country_counts.head(20).to_string())
-    ocean = (out_df["country_iso"] == "OCEAN").sum()
-    print(f"\nOcean/unmatched: {ocean} ({100*ocean/len(df):.1f}%)")
-
-    # Save encoder mapping (iso -> integer index) for model training
-    iso_list = sorted(out_df["country_iso"].unique())
-    encoder = pd.DataFrame({"country_iso": iso_list, "country_idx": range(len(iso_list))})
-    enc_path = DATA_DIR / "country_encoder.csv"
-    encoder.to_csv(enc_path, index=False)
-    print(f"Country encoder saved -> {enc_path}  ({len(iso_list)} classes)")
 
 
 if __name__ == "__main__":
     main()
+
