@@ -45,12 +45,17 @@ import pandas as pd
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from data.dataset import find_dataset_paths
+
 DATA_DIR = ROOT / "data"
 DATA_DIR.mkdir(exist_ok=True)
 CACHE_DIR = DATA_DIR / "raster_cache"
 CACHE_DIR.mkdir(exist_ok=True)
 
-COORDS_CSV = ROOT / "training_dataset" / "noised_dataset" / "ground_truth_coordinates.csv"
+auto_coords, _ = find_dataset_paths()
+COORDS_CSV = auto_coords
 
 # ---------------------------------------------------------------------------
 # Köppen-Geiger class definitions (Beck et al. 2018)

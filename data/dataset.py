@@ -302,6 +302,9 @@ def get_dataloaders(
     max_val_samples: int = None,
     images_dir: Path = None,
     coords_csv: Path = None,
+    use_osv5m: bool = False,
+    osv5m_meta_csv: Path = None,
+    osv5m_images_dir: Path = None,
 ):
     """
     Returns (train_loader, val_loader, dataset_meta).
@@ -311,6 +314,18 @@ def get_dataloaders(
                           max_samples=max_train_samples, images_dir=images_dir, coords_csv=coords_csv)
     val_ds   = GeoDataset("val",   val_frac=val_frac, seed=seed, augment=False,
                           max_samples=max_val_samples, images_dir=images_dir, coords_csv=coords_csv)
+
+    if use_osv5m:
+        from data.osv5m_loader import OSV5MDataset, CombinedGeoDataset
+        meta_path = osv5m_meta_csv or (DATA_DIR / "osv5m_train.csv")
+        img_dir = osv5m_images_dir or (DATA_DIR / "osv5m_images")
+        if Path(meta_path).exists() and Path(img_dir).exists():
+            osv_meta = pd.read_csv(meta_path)
+            osv_ds = OSV5MDataset(osv_meta, img_dir, augment=True)
+            train_ds = CombinedGeoDataset(train_ds, osv_ds)
+            print(f"[get_dataloaders] Integrated OSV5M external dataset ({len(osv_ds)} images)")
+        else:
+            print(f"[get_dataloaders] WARNING: OSV5M data not found at {meta_path} or {img_dir}. Proceeding with internal data only.")
 
     g = torch.Generator()
     g.manual_seed(seed)
@@ -329,10 +344,11 @@ def get_dataloaders(
     )
 
     meta = {
-        "n_geocells":  train_ds.n_geocells,
-        "n_countries": train_ds.n_countries,
+        "n_geocells":  getattr(train_ds, "n_geocells", 1000),
+        "n_countries": getattr(train_ds, "n_countries", 150),
     }
     return train_loader, val_loader, meta
+
 
 
 

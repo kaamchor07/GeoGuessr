@@ -187,6 +187,9 @@ def train(args):
         max_val_samples=max_val,
         images_dir=args.images_dir,
         coords_csv=args.coords_csv,
+        use_osv5m=args.use_osv5m,
+        osv5m_meta_csv=args.osv5m_meta_csv,
+        osv5m_images_dir=args.osv5m_images_dir,
     )
     n_geocells  = meta["n_geocells"]
     n_countries = meta["n_countries"]
@@ -224,6 +227,10 @@ def train(args):
         sigma_km=args.sigma_km,
         w_geocell=args.w_geocell,
         w_country=args.w_country,
+        w_koppen=args.w_koppen,
+        w_worldcover=args.w_worldcover,
+        w_elevation=args.w_elevation,
+        w_domain=args.w_domain,
     ).to(device)
 
     # --- Optimizer (only trainable params) ---
@@ -445,16 +452,25 @@ def get_parser():
     p.add_argument("--num_workers",type=int, default=0)
     p.add_argument("--coords_csv", type=str, default=None, help="Path to ground_truth_coordinates.csv")
     p.add_argument("--images_dir", type=str, default=None, help="Path to images directory")
+    p.add_argument("--use_osv5m",  action="store_true", help="Merge OSV5M external dataset into training")
+    p.add_argument("--osv5m_meta_csv", type=str, default=None, help="Path to osv5m_train.csv")
+    p.add_argument("--osv5m_images_dir", type=str, default=None, help="Path to osv5m images directory")
+
     # Model
     p.add_argument("--clip_model",     type=str, default="ViT-B-32")
     p.add_argument("--clip_pretrained",type=str, default="openai")
     p.add_argument("--embed_dim",  type=int, default=512)
     p.add_argument("--hidden_dim", type=int, default=512)
     p.add_argument("--dropout",    type=float, default=0.2)
+
     # Loss
     p.add_argument("--sigma_km",   type=float, default=500.0)
     p.add_argument("--w_geocell",  type=float, default=1.0)
     p.add_argument("--w_country",  type=float, default=0.5)
+    p.add_argument("--w_koppen",   type=float, default=0.2)
+    p.add_argument("--w_worldcover", type=float, default=0.2)
+    p.add_argument("--w_elevation", type=float, default=0.1)
+    p.add_argument("--w_domain",   type=float, default=0.3)
     # Training
     p.add_argument("--epochs",     type=int, default=1)
     p.add_argument("--lr",         type=float, default=3e-4)
