@@ -299,6 +299,17 @@ def evaluate_checkpoint(
     print(f"  {'Stage 4 (+ Country Snapped)':<36}  {score_snap['median_score']:>12.4f}  {score_snap['coverage_rate']*100:>9.1f}%  {score_snap['mean_score']:>10.4f}")
     print("=" * 65)
 
+    return {
+        "median_dist_km": float(np.median(dists_raw)),
+        "mean_dist_km":   float(np.mean(dists_raw)),
+        "country_acc":    float(country_acc_land),
+        "geocell_top1":   float(geocell_top1),
+        "geocell_top5":   float(geocell_top5),
+        "stage1_proxy_median": float(score_raw['median_score']),
+        "stage1_proxy_coverage": float(score_raw['coverage_rate']),
+    }
+
+
 
 
 
