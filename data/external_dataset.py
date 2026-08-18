@@ -160,10 +160,16 @@ def download_and_package_osv5m(
 
     try:
         from datasets import load_dataset
-        dataset = load_dataset(hf_dataset_name, split="train", streaming=True)
+        print(f"[External Dataset] Loading {hf_dataset_name} with streaming=True, trust_remote_code=True...")
+        dataset = load_dataset(hf_dataset_name, split="train", streaming=True, trust_remote_code=True)
     except Exception as e:
-        print(f"[External Dataset] HF streaming failed or 'datasets' not installed: {e}")
-        dataset = None
+        print(f"[External Dataset] HF streaming failed: {e}")
+        try:
+            from datasets import load_dataset
+            dataset = load_dataset(hf_dataset_name, split="train", streaming=True, trust_remote_code=True, full=False)
+        except Exception as e2:
+            print(f"[External Dataset] Secondary HF load failed: {e2}")
+            dataset = None
 
     collected_rows = []
     country_counts = defaultdict(int)
