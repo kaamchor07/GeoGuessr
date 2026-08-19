@@ -157,10 +157,13 @@ def evaluate_checkpoint(
     geocell_top5 = float(np.mean([all_true_cells[i] in all_top5_cells[i] for i in range(len(all_true_cells))]))
     country_top1 = float(np.mean([t == p for t, p in zip(all_true_countries, all_pred_countries)]))
 
+    land_mask = [t != "OCEAN" for t in all_true_countries]
+    country_acc_land = float(np.mean([t == p for t, p, m in zip(all_true_countries, all_pred_countries, land_mask) if m])) * 100 if any(land_mask) else (country_top1 * 100)
+
     print("\n" + "=" * 65)
     print(f"  CLASSIFICATION METRICS (Val N = {len(true_lats)})")
     print("=" * 65)
-    print(f"  Country Top-1 Accuracy:  {country_top1 * 100:.2f}%")
+    print(f"  Country Top-1 Accuracy:  {country_top1 * 100:.2f}% (Land-only: {country_acc_land:.2f}%)")
     print(f"  Geocell Top-1 Accuracy:  {geocell_top1 * 100:.2f}%")
     print(f"  Geocell Top-5 Accuracy:  {geocell_top5 * 100:.2f}%")
 

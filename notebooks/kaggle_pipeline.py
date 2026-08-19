@@ -57,6 +57,7 @@ def run_pipeline(
     num_workers: int = 4,
     run_name: str = "k1000_osv5m_ep20",
     seed: int = 42,
+    skip_train_if_exists: bool = False,
 ):
     start_total_time = time.time()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -167,12 +168,16 @@ def run_pipeline(
         train_args.osv5m_meta_csv = str(osv5m_meta_csv)
         train_args.osv5m_images_dir = str(osv5m_images_dir)
 
-    # Launch training
-    run_training(train_args)
-
     ckpt_path = CHECKPOINTS_DIR / run_name / "best.pt"
+
+    if skip_train_if_exists and ckpt_path.exists():
+        print(f"  ✓ Checkpoint already exists at {ckpt_path} — skipping training.")
+    else:
+        # Launch training
+        run_training(train_args)
+
     assert ckpt_path.exists(), f"Expected checkpoint not found at {ckpt_path}"
-    print(f"\n  ✓ Training complete. Checkpoint saved -> {ckpt_path}")
+    print(f"\n  ✓ Model checkpoint ready -> {ckpt_path}")
 
     # -------------------------------------------------------------------------
     # STAGE 4: Honest Validation Evaluation
@@ -251,8 +256,8 @@ if __name__ == "__main__":
     parser.add_argument("--epochs",     type=int, default=20)
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--num_workers",type=int, default=4)
-    parser.add_argument("--run_name",   type=str, default="k1000_osv5m_ep20")
     parser.add_argument("--seed",       type=int, default=42)
+    parser.add_argument("--skip_train_if_exists", action="store_true", help="Skip training if checkpoints/<run_name>/best.pt already exists")
     args = parser.parse_args()
 
     run_pipeline(
@@ -262,4 +267,5 @@ if __name__ == "__main__":
         num_workers=args.num_workers,
         run_name=args.run_name,
         seed=args.seed,
+        skip_train_if_exists=args.skip_train_if_exists,
     )
