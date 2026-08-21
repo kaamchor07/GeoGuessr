@@ -1,10 +1,10 @@
-# 🌍 Worldwide Image Geolocation Prediction
+#  Worldwide Image Geolocation Prediction
 
 An end-to-end deep learning framework for predicting global geographic coordinates (`latitude`, `longitude`) and calibrated uncertainty radii (`radius_km`) from street-level imagery.
 
 ---
 
-## 📑 Table of Contents
+##  Table of Contents
 - [Executive Overview](#-executive-overview)
 - [System Architecture](#-system-architecture)
 - [End-to-End Data Pipeline](#-end-to-end-data-pipeline)
@@ -16,7 +16,7 @@ An end-to-end deep learning framework for predicting global geographic coordinat
 
 ---
 
-## 🚀 Executive Overview
+##  Executive Overview
 
 The objective of this challenge is to predict the true coordinates of an image anywhere on Earth while estimating a prediction radius. The evaluation metric rewards accurate coordinate predictions paired with tight radii, while severely penalizing overconfidence when the true location falls outside the claimed radius:
 
@@ -26,7 +26,7 @@ Through extensive iterations, our model evolved from a **1,480 km baseline** dow
 
 ---
 
-## 🏗 System Architecture
+##  System Architecture
 
 ```mermaid
 flowchart TD
@@ -68,7 +68,7 @@ flowchart TD
 
 ---
 
-## 🔄 End-to-End Data Pipeline
+##  End-to-End Data Pipeline
 
 ### 1. 3D Unit-Sphere Space Conversion
 Euclidean distances on raw `(lat, lon)` break completely at the antimeridian ($+180^\circ / -180^\circ$) and shrink longitudinally near the poles. All coordinates are projected onto the 3D unit sphere before any spatial operations:
@@ -91,7 +91,7 @@ Standard vision pipelines randomly flip images horizontally. In geolocation, **h
 
 ---
 
-## 🔬 Experimental Journey: What We Tried & What Failed
+##  Experimental Journey: What We Tried & What Failed
 
 | Strategy / Experiment | Core Hypothesis | Outcome / Observation | Why It Succeeded or Failed |
 | :--- | :--- | :--- | :--- |
@@ -104,7 +104,7 @@ Standard vision pipelines randomly flip images horizontally. In geolocation, **h
 
 ---
 
-## 🏆 The Winning Strategy & Key Breakthroughs
+##  The Winning Strategy & Key Breakthroughs
 
 ### 1. Fine-Tuning Top Transformer Layers
 ```python
@@ -133,7 +133,7 @@ $$\mathcal{L} = D_{\text{KL}}\left(\mathbf{T} \parallel \text{Softmax}(\mathbf{z
 
 ---
 
-## 🎯 Uncertainty Radius Calibration
+##  Uncertainty Radius Calibration
 
 Rather than a static formula, we compute the **Shannon Entropy** of the predicted geocell distribution:
 
@@ -149,7 +149,7 @@ By binning validation predictions into 10 entropy tiers and assigning the 70th p
 
 ---
 
-## 📊 Benchmark Results
+##  Benchmark Results
 
 | Model Version / Milestone | Backbone | Training Data | Country Top-1 | Val Median Error | $\% < 750\text{ km}$ | Median Radius | Score Proxy |
 | :--- | :--- | :--- | :---: | :---: | :---: | :---: | :---: |
@@ -160,7 +160,7 @@ By binning validation predictions into 10 entropy tiers and assigning the 70th p
 
 ---
 
-## 📂 Repository Structure & Quickstart
+##  Repository Structure & Quickstart
 
 ```
 geolocation-prediction/
